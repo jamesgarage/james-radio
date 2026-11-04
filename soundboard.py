@@ -439,8 +439,8 @@ def make_server(mixer, sounds):
                 self._send(200, page, "text/html; charset=utf-8")
             elif path == "/level":
                 state["last_poll"] = time.monotonic()   # the page's poll doubles as its heartbeat
-                self._send(200, json.dumps({"level": mixer.level, "speaker": mixer.device}).encode(),
-                           "application/json")
+                self._send(200, json.dumps({"level": mixer.level, "speaker": mixer.device,
+                                            "volume": round(mixer.volume * 100)}).encode(), "application/json")
             else:
                 self._send(404)
 
@@ -709,10 +709,11 @@ vol.addEventListener("input", () => {
 
 const meter = document.getElementById("meter"), spk = document.getElementById("spk");
 const segs = Array.from({ length: 16 }, () => meter.appendChild(document.createElement("i")));
-let shown = 0;
+let shown = 0, synced = false;
 async function poll() {
   try {
-    const { level, speaker } = await (await fetch("/level")).json();
+    const { level, speaker, volume } = await (await fetch("/level")).json();
+    if (!synced) { vol.value = volume; volout.textContent = `${volume}%`; synced = true; }   // a reload keeps the app's volume
     spk.textContent = "\u{1F50A} " + ((speaker.match(/\(([^)]+)\)/) || [, speaker])[1]).replace(/^\d+- /, "");
     shown = Math.max(Math.round(Math.min(1, Math.sqrt(level) * 1.6) * segs.length), shown - 1);
     segs.forEach((g, k) => g.classList.toggle("on", k < shown));
