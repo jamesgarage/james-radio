@@ -598,14 +598,31 @@ def main():
 
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>James' Radio</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1d2027">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="James' Radio">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
-html { font-size: min(1vw, 1.08vh); }   /* 1rem = one unit; the whole toy scales with the window */
+/* Two layouts, one page.
+   Console: a laptop, or a tablet on its side. The whole toy fits the window; 1rem = one toy unit.
+   Flow: phones, portrait tablets, short windows. Real-size type, 3 / 4 / 6 columns, the page scrolls down
+   (never sideways), and STOP + volume stay pinned at the bottom. */
+:root { color-scheme: dark; --cols: 3; }
+@media (min-width: 600px) { :root { --cols: 4; } }
+@media (min-width: 900px), (orientation: landscape) and (min-width: 640px) { :root { --cols: 6; } }
+html { font-size: min(1vw, calc(100vh / 90)); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+@supports (height: 100dvh) { html { font-size: min(1vw, calc(100dvh / 90)); } }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-body { margin: 0; height: 100vh; display: grid; place-items: center; overflow: hidden; user-select: none;
-  touch-action: manipulation; font-family: "Segoe UI", system-ui, sans-serif;
-  background: radial-gradient(ellipse at 50% 35%, #4b5160 0%, #1d2027 55%, #0d0e11 100%); }
+body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: center; overflow: hidden;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: #eef0f3;
+  background: #15171c radial-gradient(ellipse at 50% 35%, #4b5160 0%, #1d2027 55%, #0d0e11 100%); }
 .device { position: relative; width: 96rem; padding: 3rem 3.2rem 3.2rem; border-radius: 3.2rem;
+  display: grid; grid-template-columns: 1fr auto auto; align-items: center;
+  grid-template-areas: "top top top" "pads pads pads" "bottom extras grille";
   background: linear-gradient(180deg, #5a606c 0%, #363a43 3%, #2a2d34 50%, #202328 97%, #121316 100%);
   box-shadow: 0 2.5rem 5rem rgba(0,0,0,.75), 0 .6rem 0 #0e0f12,
               inset 0 .15rem 0 rgba(255,255,255,.25), inset 0 -.2rem .4rem rgba(0,0,0,.6); }
@@ -619,25 +636,26 @@ body { margin: 0; height: 100vh; display: grid; place-items: center; overflow: h
 .s1 { top: 1.1rem; left: 1.1rem; --r: 30deg } .s2 { top: 1.1rem; right: 1.1rem; --r: -50deg }
 .s3 { bottom: 1.1rem; left: 1.1rem; --r: 80deg } .s4 { bottom: 1.1rem; right: 1.1rem; --r: 10deg }
 
-.top { display: flex; align-items: center; gap: 2.4rem; margin-bottom: 2.4rem; }
-.brand { margin: 0; color: #eef0f3; font-weight: 900; font-size: 3rem; letter-spacing: .06em; line-height: .95;
+.top { grid-area: top; display: flex; align-items: center; gap: 2.4rem; margin-bottom: 2.4rem; min-width: 0; }
+.brand { margin: 0; color: #eef0f3; font-weight: 900; font-size: 3rem; letter-spacing: .04em; line-height: .95;
   text-shadow: 0 .15rem 0 #000, 0 -.08rem 0 rgba(255,255,255,.2); }
 .brand b { background: linear-gradient(90deg, #ff6161, #ffad45, #ffe65e, #66e680, #66b8ff, #c896ff);
   -webkit-background-clip: text; background-clip: text; color: transparent; text-shadow: none;
   filter: drop-shadow(0 .15rem 0 #000); }
-.brand small { display: block; font-size: 1.15rem; font-weight: 700; color: #9aa1ab; letter-spacing: .32em; margin-top: .7rem; }
-.lcd { flex: 1; height: 7.4rem; border-radius: 1.1rem; padding: 0 2.2rem; position: relative; overflow: hidden;
+.brand small { display: block; font-size: max(12px, 1.2rem); font-weight: 700; color: #a3aab4; letter-spacing: .3em; margin-top: .7rem; }
+.lcd { flex: 1; min-width: 0; height: 7.4rem; border-radius: 1.1rem; padding: 0 2.2rem; position: relative; overflow: hidden;
   display: flex; align-items: center; justify-content: space-between; gap: 2rem;
   background: linear-gradient(180deg, #0a1d10, #10301b); border: .5rem solid #0b0c0e;
   box-shadow: inset 0 .5rem 1.2rem rgba(0,0,0,.9), 0 .12rem 0 rgba(255,255,255,.14); }
 .lcd::after { content: ""; position: absolute; inset: 0; pointer-events: none;
   background: repeating-linear-gradient(0deg, rgba(0,0,0,.28) 0 2px, transparent 2px 4px),
               linear-gradient(160deg, rgba(255,255,255,.08), transparent 40%); }
-#now { font: 700 2.9rem Consolas, "Courier New", monospace; color: #62ff8f; letter-spacing: .12em;
+#now { min-width: 0; font: 700 2.9rem Consolas, "Courier New", monospace; color: #62ff8f; letter-spacing: .12em;
   text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   text-shadow: 0 0 .9rem rgba(98,255,143,.85); }
-.right { display: flex; flex-direction: column; align-items: flex-end; gap: .5rem; flex: none; }
-#spk { font: 700 1.15rem Consolas, monospace; color: #3fb866; letter-spacing: .1em; text-transform: uppercase; }
+.right { display: flex; flex-direction: column; align-items: flex-end; gap: .5rem; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+#spk { max-width: 100%; font: 700 max(12px, 1.2rem) Consolas, monospace; color: #4fd179; letter-spacing: .1em;
+  text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .meter { display: flex; gap: .45rem; flex: none; }
 .meter i { width: .95rem; height: 3.4rem; border-radius: .2rem; background: #163020; }
 .meter i:nth-child(n+11) { background: #35300f; }
@@ -646,50 +664,59 @@ body { margin: 0; height: 100vh; display: grid; place-items: center; overflow: h
 .meter i.on:nth-child(n+11) { background: #ffd84d; box-shadow: 0 0 .8rem #ffd84d; }
 .meter i.on:nth-child(n+14) { background: #ff4d4d; box-shadow: 0 0 .8rem #ff4d4d; }
 
-.pads { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1.8rem; padding: 2.2rem 1.8rem 1.8rem;
+.pads { grid-area: pads; display: grid; grid-template-columns: repeat(6, 1fr); gap: 1.8rem; padding: 2.2rem 1.8rem 1.8rem;
   border-radius: 2rem; background: #111317;
   box-shadow: inset 0 .5rem 1.5rem rgba(0,0,0,.9), 0 .12rem 0 rgba(255,255,255,.12); }
-.well { aspect-ratio: 1.1; border-radius: 2rem; padding: .7rem; background: #08090b;
+.well { container-type: inline-size; aspect-ratio: 1.1; min-width: 0; border-radius: 2rem; padding: .7rem; background: #08090b;
   box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.95), 0 .1rem 0 rgba(255,255,255,.08); transition: box-shadow .25s; }
 .well.lit { box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.6), 0 0 2.8rem .35rem var(--glow), 0 .1rem 0 rgba(255,255,255,.08); }
-.pad { width: 100%; height: 100%; border: 0; padding: 0; margin: 0; cursor: pointer; position: relative; outline: none;
+/* Pressed state: instant on pointer-down, a short spring back up on release. */
+.pad { width: 100%; height: 100%; border: 0; padding: 0 .4rem; margin: 0; cursor: pointer; position: relative;
   border-radius: 1.6rem; color: var(--t); font: inherit;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .3rem;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3cqi;
   background: radial-gradient(120% 70% at 50% 0%, rgba(255,255,255,.62), rgba(255,255,255,0) 60%),
               linear-gradient(180deg, var(--c), var(--d));
   box-shadow: 0 1rem 0 var(--e), 0 1.4rem 1.2rem rgba(0,0,0,.55),
               inset 0 .25rem 0 rgba(255,255,255,.5), inset 0 -.6rem 1rem rgba(0,0,0,.18);
-  transform: translateY(-1rem); transition: transform .05s ease-out, box-shadow .05s ease-out, filter .2s; }
+  transform: translateY(-1rem);
+  transition: transform .38s cubic-bezier(.3, 1.7, .45, 1), box-shadow .38s cubic-bezier(.3, 1.7, .45, 1), filter .2s ease; }
 .pad.down { transform: translateY(-.15rem);
+  transition: transform .05s ease-out, box-shadow .05s ease-out, filter .2s ease;
   box-shadow: 0 .15rem 0 var(--e), 0 .3rem .5rem rgba(0,0,0,.6),
               inset 0 .25rem 0 rgba(255,255,255,.35), inset 0 .6rem 1.2rem rgba(0,0,0,.25); }
+.pad:focus-visible { outline: .35rem solid #fff; outline-offset: .3rem; }
 .well.lit .pad { filter: brightness(1.2) saturate(1.15); }
-.emo { font-size: 5.4rem; line-height: 1; font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+.emo { font-size: 38cqi; line-height: 1; font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
   filter: drop-shadow(0 .3rem .25rem rgba(0,0,0,.35)); transition: transform .12s; }
 .well.lit .emo { transform: scale(1.12) rotate(-4deg); }
-.lbl { font-size: 1.45rem; font-weight: 900; letter-spacing: .06em; text-transform: uppercase;
-  text-shadow: 0 .12rem .1rem rgba(0,0,0,.3); }
-.key { position: absolute; top: .8rem; left: .9rem; min-width: 2.3rem; padding: .15rem .45rem; border-radius: .5rem;
-  font-size: 1.2rem; font-weight: 800; color: rgba(0,0,0,.55); background: rgba(255,255,255,.38);
+.lbl { max-width: 100%; font-size: max(12px, 11cqi); font-weight: 900; line-height: 1.1; letter-spacing: .04em;
+  text-transform: uppercase; text-wrap: balance; text-shadow: 0 .12rem .1rem rgba(0,0,0,.3); }
+.key { display: none; position: absolute; top: 6cqi; left: 6cqi; min-width: 2.3rem; padding: .1rem .45rem; border-radius: .5rem;
+  font-size: max(12px, 9.5cqi); font-weight: 800; color: rgba(0,0,0,.62); background: rgba(255,255,255,.42);
   box-shadow: inset 0 -.12rem 0 rgba(0,0,0,.15); text-align: center; }
 
-.bottom { display: flex; align-items: center; gap: 3rem; margin-top: 2.6rem; }
+.bottom { grid-area: bottom; display: flex; align-items: center; gap: 3rem; margin-top: 2.6rem; min-width: 0; }
 .collar { width: 11rem; height: 11rem; border-radius: 50%; display: grid; place-items: center; flex: none;
   background: conic-gradient(from 200deg, #9aa0a8, #eceef1, #7b818a, #cdd1d6, #5d626a, #9aa0a8);
   box-shadow: 0 .4rem .8rem rgba(0,0,0,.7), inset 0 0 0 .3rem rgba(0,0,0,.25); }
-.stop { width: 8.4rem; height: 8.4rem; border-radius: 50%; border: 0; cursor: pointer; outline: none; color: #fff;
-  font: 900 1.6rem "Segoe UI", sans-serif; letter-spacing: .1em; text-shadow: 0 .15rem 0 rgba(0,0,0,.35);
+.stop { width: 8.4rem; height: 8.4rem; border-radius: 50%; border: 0; padding: 0; cursor: pointer; color: #fff;
+  font: 900 max(12px, 1.6rem) "Segoe UI", system-ui, sans-serif; letter-spacing: .1em; text-shadow: 0 .15rem 0 rgba(0,0,0,.35);
   background: radial-gradient(circle at 42% 30%, #ffa0a0 0, #ff2b2b 35%, #c40f0f 70%, #7d0606 100%);
   box-shadow: 0 .9rem 0 #5a0505, 0 1.2rem 1rem rgba(0,0,0,.6), inset 0 .3rem 0 rgba(255,255,255,.35);
-  transform: translateY(-.9rem); transition: transform .05s, box-shadow .05s; }
-.stop.down { transform: translateY(-.1rem);
+  transform: translateY(-.9rem);
+  transition: transform .38s cubic-bezier(.3, 1.7, .45, 1), box-shadow .38s cubic-bezier(.3, 1.7, .45, 1); }
+.stop.down { transform: translateY(-.1rem); transition: transform .05s ease-out, box-shadow .05s ease-out;
   box-shadow: 0 .1rem 0 #5a0505, 0 .3rem .5rem rgba(0,0,0,.6), inset 0 .5rem 1rem rgba(0,0,0,.3); }
-.stop span { display: block; font-size: 2.8rem; line-height: 1.1; font-family: "Segoe UI Emoji", sans-serif; }
-.fader { flex: 1; }
-.fader .lab { display: flex; justify-content: space-between; color: #a3aab4; font-weight: 800; font-size: 1.3rem;
+.stop:focus-visible { outline: .35rem solid #fff; outline-offset: .4rem; }
+.stop span { display: block; font-size: 2.8rem; line-height: 1.1; font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif; }
+.fader { flex: 1; min-width: 0; }
+.fader .lab { display: flex; justify-content: space-between; color: #a3aab4; font-weight: 800; font-size: max(12px, 1.3rem);
   letter-spacing: .35em; margin-bottom: .4rem; }
+.fader .lab label { cursor: pointer; }
 .fader .lab output { font-family: Consolas, monospace; letter-spacing: .05em; color: #62ff8f; }
-input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 5.4rem; background: transparent; margin: 0; cursor: pointer; }
+input[type=range] { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: max(44px, 5.4rem);
+  background: transparent; margin: 0; cursor: pointer; }
+input[type=range]:focus-visible { outline: .3rem solid #62ff8f; outline-offset: .2rem; border-radius: 1rem; }
 input[type=range]::-webkit-slider-runnable-track { height: 1.3rem; border-radius: .65rem; background: #08090b;
   box-shadow: inset 0 .25rem .5rem rgba(0,0,0,.95), 0 .1rem 0 rgba(255,255,255,.12); }
 input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 3.6rem; height: 5.4rem; margin-top: -2.05rem;
@@ -697,70 +724,170 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 3.6re
   background: linear-gradient(180deg, transparent 47%, #26292e 47% 53%, transparent 53%),
               linear-gradient(90deg, #5f646c, #eef0f3 45%, #a7adb5 55%, #4c5057);
   box-shadow: 0 .4rem .7rem rgba(0,0,0,.75), inset 0 .1rem 0 rgba(255,255,255,.6); }
-.ticks { display: flex; justify-content: space-between; padding: 0 1.4rem; color: #6c727c;
-  font: 700 1.1rem Consolas, monospace; }
-.extras { display: flex; gap: 1.6rem; flex: none; }
+input[type=range]::-moz-range-track { height: 1.3rem; border-radius: .65rem; background: #08090b; }
+input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; border-radius: .7rem;
+  background: linear-gradient(90deg, #5f646c, #eef0f3 45%, #a7adb5 55%, #4c5057); }
+.ticks { display: flex; justify-content: space-between; padding: 0 1.4rem; color: #9aa1ab;
+  font: 700 max(12px, 1.1rem) Consolas, monospace; }
+.extras { grid-area: extras; display: flex; gap: 1.6rem; margin: 2.6rem 0 0 3rem; }
 .extras:empty { display: none; }
-.extra { width: 11rem; height: 9.5rem; border: 0; border-radius: 1.6rem; cursor: pointer; color: #fff; padding: .6rem;
-  font: 900 1.5rem "Segoe UI", sans-serif; letter-spacing: .06em; text-transform: uppercase;
-  text-shadow: 0 .12rem .1rem rgba(0,0,0,.3);
-  background: radial-gradient(120% 70% at 50% 0%, rgba(255,255,255,.55), rgba(255,255,255,0) 60%),
-              linear-gradient(180deg, var(--c), color-mix(in srgb, var(--c) 75%, #000));
-  box-shadow: 0 .9rem 0 color-mix(in srgb, var(--c) 45%, #000), 0 1.2rem 1rem rgba(0,0,0,.55),
-              inset 0 .25rem 0 rgba(255,255,255,.45);
-  transform: translateY(-.9rem); transition: transform .05s, box-shadow .05s; }
-.extra.down { transform: translateY(-.1rem);
-  box-shadow: 0 .1rem 0 color-mix(in srgb, var(--c) 45%, #000), 0 .3rem .5rem rgba(0,0,0,.6), inset 0 .5rem 1rem rgba(0,0,0,.25); }
-.grille { width: 17rem; height: 9.5rem; border-radius: 1.4rem; flex: none;
+.extras .well { width: 12rem; height: 10.5rem; aspect-ratio: auto; }
+.grille { grid-area: grille; width: 17rem; height: 9.5rem; margin: 2.6rem 0 0 3rem; border-radius: 1.4rem;
   background: radial-gradient(circle, #050506 40%, transparent 46%) 0 0 / 1.2rem 1.2rem, linear-gradient(#2c2f36, #24272d);
   box-shadow: inset 0 .3rem .6rem rgba(0,0,0,.8), 0 .1rem 0 rgba(255,255,255,.1); }
+
+/* Flow layout: phones, portrait tablets and short windows. */
+@media (max-width: 899.98px), (max-height: 599.98px) {
+  html { font-size: clamp(10px, 2.8vw, 13px); }
+  body { display: block; place-items: normal; height: auto; overflow: visible;
+    padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 0 max(10px, env(safe-area-inset-left)); }
+  .device { display: flex; flex-direction: column; align-items: stretch; gap: 1.2rem; width: auto; max-width: 96rem; margin: 0 auto;
+    padding: 1.4rem 1.2rem 0; border-radius: 2.4rem 2.4rem 0 0;
+    box-shadow: 0 2rem 4rem rgba(0,0,0,.7), inset 0 .15rem 0 rgba(255,255,255,.25); }
+  .screw, .grille { display: none; }
+  .top { margin: 0; flex-wrap: wrap; gap: 1rem 1.6rem; }
+  .brand { font-size: 2.6rem; }
+  .brand br { display: none; }
+  .brand small { letter-spacing: .26em; margin-top: .5rem; }
+  .lcd { flex: 1 1 26rem; height: auto; min-height: 6.2rem; flex-wrap: wrap; gap: .3rem 1.4rem;
+    padding: .8rem 1.4rem; border-width: .4rem; }
+  #now { flex: 1 1 auto; font-size: 2.2rem; }
+  .right { flex-direction: row; align-items: center; gap: 1rem; margin-left: auto; }
+  .meter { gap: .3rem; }
+  .meter i { width: .7rem; height: 2.4rem; }
+  .pads, .extras { margin: 0; gap: 1rem; padding: 1.2rem; border-radius: 1.8rem; background: #111317;
+    box-shadow: inset 0 .5rem 1.5rem rgba(0,0,0,.9), 0 .12rem 0 rgba(255,255,255,.12); }
+  .pads { grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); }
+  .extras { display: grid; justify-content: center;   /* fixed-width tracks: a short last row sits centred */
+    grid-template-columns: repeat(auto-fit, calc((100% - (var(--cols) - 1) * 1rem) / var(--cols))); }
+  .extras .well { width: auto; height: auto; aspect-ratio: 1.1; }
+  .well { border-radius: 1.6rem; padding: .5rem; }
+  .pad { border-radius: 1.3rem; transform: translateY(-.7rem);
+    box-shadow: 0 .7rem 0 var(--e), 0 1rem .9rem rgba(0,0,0,.55),
+                inset 0 .25rem 0 rgba(255,255,255,.5), inset 0 -.6rem 1rem rgba(0,0,0,.18); }
+  .pad.down { transform: translateY(-.1rem); }
+  .bottom { position: sticky; bottom: 0; z-index: 2; margin: 0 -1.2rem; gap: 1.6rem;
+    padding: 1rem 1.8rem calc(1rem + env(safe-area-inset-bottom));
+    background: rgba(30, 33, 39, .84); -webkit-backdrop-filter: blur(18px) saturate(150%); backdrop-filter: blur(18px) saturate(150%);
+    border-top: 1px solid rgba(255, 255, 255, .12); }
+  .collar { width: 7.6rem; height: 7.6rem; }
+  .stop { width: 6rem; height: 6rem; font-size: max(12px, 1.2rem); transform: translateY(-.55rem);
+    box-shadow: 0 .55rem 0 #5a0505, 0 .8rem .8rem rgba(0,0,0,.6), inset 0 .25rem 0 rgba(255,255,255,.35); }
+  .stop.down { transform: translateY(-.05rem); }
+  .stop span { font-size: 2rem; }
+  .fader .lab { letter-spacing: .25em; margin: 0; }
+  input[type=range] { height: max(44px, 4.4rem); }
+  input[type=range]::-webkit-slider-thumb { height: 4.4rem; margin-top: -1.55rem; }
+  .ticks { padding: 0 1.2rem; }
+}
+/* A phone on its side: little height, so shorter pads and a slimmer header. */
+@media (orientation: landscape) and (max-height: 500px) {
+  html { font-size: clamp(9px, 2.6vh, 12px); }
+  .well { aspect-ratio: 1.45; }
+  .extras .well { aspect-ratio: 1.45; }
+  .top { flex-wrap: nowrap; }
+  .brand small { display: none; }
+  .lcd { min-height: 5rem; }
+}
+
+/* Only where a mouse is: hover warmth and the keyboard hints. Nothing depends on hover. */
+@media (hover: hover) and (pointer: fine) {
+  .pad:hover, .stop:hover { filter: brightness(1.08); }
+  .key { display: block; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pad, .pad.down, .stop, .stop.down, .emo, .well { transition: none; }
+  .well.lit .emo { transform: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .bottom { background: #1e2127; -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
 </style></head>
 <body>
-<div class="device">
-  <i class="screw s1"></i><i class="screw s2"></i><i class="screw s3"></i><i class="screw s4"></i>
-  <div class="top">
-    <h1 class="brand">JAMES'<br><b>RADIO</b><small>MAKE SOME NOISE</small></h1>
-    <div class="lcd"><div id="now">PRESS A BUTTON &#9733;</div><div class="right"><div id="spk"></div><div class="meter" id="meter"></div></div></div>
-  </div>
-  <div class="pads" id="pads"></div>
-  <div class="bottom">
-    <div class="collar"><button class="stop" id="stop"><span>&#9995;</span>STOP</button></div>
+<main class="device">
+  <i class="screw s1" aria-hidden="true"></i><i class="screw s2" aria-hidden="true"></i>
+  <i class="screw s3" aria-hidden="true"></i><i class="screw s4" aria-hidden="true"></i>
+  <header class="top">
+    <h1 class="brand">JAMES' <br><b>RADIO</b><small>MAKE SOME NOISE</small></h1>
+    <div class="lcd"><div id="now" role="status" aria-live="polite">PRESS A BUTTON &#9733;</div>
+      <div class="right" aria-hidden="true"><div id="spk"></div><div class="meter" id="meter"></div></div></div>
+  </header>
+  <section class="pads" id="pads" aria-label="Sounds"></section>
+  <section class="extras" id="extras" aria-label="More buttons"></section>
+  <footer class="bottom">
+    <div class="collar"><button class="stop" id="stop" type="button"><span aria-hidden="true">&#9995;</span>STOP</button></div>
     <div class="fader">
-      <div class="lab"><span>VOLUME</span><output id="volout">100%</output></div>
+      <div class="lab"><label for="vol">VOLUME</label><output id="volout" for="vol">100%</output></div>
       <input id="vol" type="range" min="0" max="150" value="100">
-      <div class="ticks"><span>0</span><span>50</span><span>100</span><span>150</span></div>
+      <div class="ticks" aria-hidden="true"><span>0</span><span>50</span><span>100</span><span>150</span></div>
     </div>
-    <div class="extras" id="extras"></div>
-    <div class="grille"></div>
-  </div>
-</div>
+  </footer>
+  <div class="grille" aria-hidden="true"></div>
+</main>
 <script>
 const SOUNDS = __CONFIG__, EXTRAS = __EXTRAS__, TOKEN = "__TOKEN__";
 const post = (path) => fetch(`${path}?t=${TOKEN}`, { method: "POST" }).catch(() => {});
-const now = document.getElementById("now"), pads = document.getElementById("pads");
+const $ = (id) => document.getElementById(id);
+const now = $("now");
 let idle;
 function show(text) {
   now.textContent = text;
   clearTimeout(idle);
   idle = setTimeout(() => (now.textContent = "PRESS A BUTTON ★"), 2500);
 }
+function span(cls, text) {
+  const s = document.createElement("span");
+  s.className = cls;
+  s.textContent = text;   // never innerHTML: plugin labels are plain text
+  return s;
+}
+
+// Feedback on pointer-down. A mouse plays at once; a finger plays when it lifts, so a finger that starts
+// scrolling the page (the browser sends pointercancel) plays nothing. STOP acts on touch-down regardless.
+function pressable(el, act, immediate = false) {
+  let armed = null;
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button > 0) return;
+    e.preventDefault();
+    el.classList.add("down");
+    if (immediate || e.pointerType === "mouse") act();
+    else armed = e.pointerId;
+  });
+  el.addEventListener("pointerup", (e) => {
+    el.classList.remove("down");
+    if (armed === e.pointerId) act();
+    armed = null;
+  });
+  el.addEventListener("pointercancel", () => { el.classList.remove("down"); armed = null; });
+  el.addEventListener("click", (e) => { if (e.detail === 0) act(); });   // Enter on a focused button
+}
+
+function makePad(parent, p, act) {
+  const well = document.createElement("div");
+  well.className = "well";
+  well.style.setProperty("--glow", p.c);
+  const b = document.createElement("button");
+  b.className = "pad";
+  b.type = "button";
+  for (const [k, v] of Object.entries({ "--c": p.c, "--d": p.d, "--e": p.e, "--t": p.t })) b.style.setProperty(k, v);
+  if (p.key) {
+    b.append(span("key", p.key.toUpperCase()));
+    b.setAttribute("aria-keyshortcuts", p.key.toUpperCase());
+  }
+  if (p.emoji) b.append(span("emo", p.emoji));
+  b.append(span("lbl", p.name));
+  b.querySelectorAll(".key, .emo").forEach((s) => s.setAttribute("aria-hidden", "true"));
+  pressable(b, act);
+  well.append(b);
+  parent.append(well);
+  return { well, b };
+}
 
 const lit = {}, byKey = {};
 SOUNDS.forEach((s, i) => {
-  const well = document.createElement("div");
-  well.className = "well";
-  well.style.setProperty("--glow", s.c);
-  const b = document.createElement("button");
-  b.className = "pad";
-  b.style.cssText = `--c:${s.c};--d:${s.d};--e:${s.e};--t:${s.t}`;
-  b.innerHTML = `<span class="key">${s.key.toUpperCase()}</span><span class="emo">${s.emoji}</span><span class="lbl">${s.name}</span>`;
-  b.addEventListener("pointerdown", (e) => { e.preventDefault(); b.classList.add("down"); fire(i); });
-  well.append(b);
-  pads.append(well);
-  Object.assign(s, { well, b });
+  Object.assign(s, makePad($("pads"), s, () => fire(i)));
   byKey[s.key] = i;
 });
-
 function fire(i) {
   const s = SOUNDS[i];
   post(`/play/${i}`);
@@ -769,33 +896,34 @@ function fire(i) {
   lit[i] = setTimeout(() => s.well.classList.remove("lit"), s.dur * 1000);
   show(`${s.emoji} ${s.name}`);
 }
+
+// Plugin buttons (plugins/*.py) are pads too. A label that starts with an emoji uses it as the picture.
+const PICTURE = /^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*️?)\s*/u;
+EXTRAS.forEach((x, i) => {
+  const m = x.label.match(PICTURE);
+  makePad($("extras"), {
+    emoji: m ? m[1] : "", name: (m && x.label.slice(m[0].length)) || x.label, t: "#fff",
+    c: x.c, d: `color-mix(in srgb, ${x.c} 76%, #000)`, e: `color-mix(in srgb, ${x.c} 45%, #000)`,
+  }, () => { post(`/button/${i}`); show(x.label); });
+});
+
 function stopAll() {
   post("/stop");
   SOUNDS.forEach((s, i) => { clearTimeout(lit[i]); s.well.classList.remove("lit"); });
   show("✋ STOP");
 }
-const extras = document.getElementById("extras");
-EXTRAS.forEach((x, i) => {   // plugin buttons (plugins/*.py); textContent, so a label is never HTML
-  const b = document.createElement("button");
-  b.className = "extra";
-  b.style.setProperty("--c", x.c);
-  b.textContent = x.label;
-  b.addEventListener("pointerdown", (e) => { e.preventDefault(); b.classList.add("down"); post(`/button/${i}`); show(x.label); });
-  extras.append(b);
-});
-const stop = document.getElementById("stop");
-stop.addEventListener("pointerdown", (e) => { e.preventDefault(); stop.classList.add("down"); stopAll(); });
+const stop = $("stop");
+pressable(stop, stopAll, true);
 const release = () => document.querySelectorAll(".down").forEach((el) => el.classList.remove("down"));
-addEventListener("pointerup", release);
-addEventListener("pointercancel", release);
+addEventListener("pointerup", (e) => { if (e.pointerType === "mouse") release(); });   // let go somewhere else
 addEventListener("blur", release);
 addEventListener("contextmenu", (e) => e.preventDefault());   // no long-press menu under small fingers
 
 addEventListener("keydown", (e) => {
-  if (e.repeat) return;
+  if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key.toLowerCase();
   if (k === " " || k === "escape") { e.preventDefault(); stop.classList.add("down"); stopAll(); return; }
-  if (k in byKey) { SOUNDS[byKey[k]].b.classList.add("down"); fire(byKey[k]); }
+  if (k in byKey && e.target !== vol) { SOUNDS[byKey[k]].b.classList.add("down"); fire(byKey[k]); }
 });
 addEventListener("keyup", (e) => {
   const k = e.key.toLowerCase();
@@ -803,14 +931,14 @@ addEventListener("keyup", (e) => {
   if (k === " " || k === "escape") stop.classList.remove("down");
 });
 
-const vol = document.getElementById("vol"), volout = document.getElementById("volout");
+const vol = $("vol"), volout = $("volout");
 vol.addEventListener("input", () => {
   volout.textContent = `${vol.value}%`;
   post(`/volume/${vol.value}`);
   show(`VOLUME ${vol.value}%`);
 });
 
-const meter = document.getElementById("meter"), spk = document.getElementById("spk");
+const meter = $("meter"), spk = $("spk");
 const segs = Array.from({ length: 16 }, () => meter.appendChild(document.createElement("i")));
 let shown = 0, synced = false, seen = -1;
 async function poll() {
