@@ -333,6 +333,7 @@ class Mixer:
     def __init__(self, out_part):
         self.out_part, self.voices, self.lock, self.volume, self.stream = out_part, [], threading.Lock(), 1.0, None
         self.level, self.open_lock, self.device, self.fallback = 0.0, threading.Lock(), "", False
+        self.closed = False
 
     def _open(self):
         """(Re)open on the asked-for speaker, or on Windows' default output while that one is away."""
@@ -361,6 +362,8 @@ class Mixer:
         while True:
             time.sleep(5)
             with self.open_lock:
+                if self.closed:
+                    return
                 dead = self.stream is None or not self.stream.active
                 if dead or (self.fallback and not self.voices):   # only switch back between sounds
                     try:
@@ -395,6 +398,13 @@ class Mixer:
     def stop_all(self):
         with self.lock:
             self.voices = []
+
+    def close(self):
+        with self.open_lock:   # not halfway through watch() swapping streams
+            self.closed = True
+            if self.stream is not None:
+                self.stream.close()
+                self.stream = None
 
 
 # Pad colors per column: (top, bottom, side skirt, label text)
@@ -487,17 +497,21 @@ def main():
         open_app_window(url)
 
     started = time.monotonic()
-    while True:
-        time.sleep(1)
-        now, last, bye = time.monotonic(), state["last_poll"], state["bye_at"]
-        if bye and (last is None or last < bye) and now - bye > 3:
-            break                                   # window closed (a reload polls again within 3 s)
-        if last and now - last > 150:
-            break                                   # page gone without saying bye (minimized pages poll slowly)
-        if last is None and now - started > 90:
-            break                                   # page never opened
+    try:
+        while True:
+            time.sleep(1)
+            now, last, bye = time.monotonic(), state["last_poll"], state["bye_at"]
+            if bye and (last is None or last < bye) and now - bye > 3:
+                break                               # window closed (a reload polls again within 3 s)
+            if last and now - last > 150:
+                break                               # page gone without saying bye (minimized pages poll slowly)
+            if last is None and now - started > 90:
+                break                               # page never opened
+    except KeyboardInterrupt:
+        pass                                        # Ctrl+C in the console window: stop the same clean way
     server.shutdown()
-    mixer.stream.close()
+    server.server_close()
+    mixer.close()
     print("Window closed; Super Sound Pad stopped.", flush=True)
 
 
