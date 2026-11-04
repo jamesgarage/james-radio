@@ -6,7 +6,7 @@
 
     uv run mic_echo.py --list
     uv run mic_echo.py                                  # Windows default mic -> default output
-    uv run mic_echo.py --in "USB Advanced" --out "Speakers (Bose" --gain 0.3
+    uv run mic_echo.py --in "Microphone (USB" --out "Speakers (USB" --gain 0.3
 
 Stop with Ctrl+C. Keep the mic away from the speaker, or it howls.
 """

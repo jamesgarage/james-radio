@@ -5,7 +5,7 @@
 """Super Sound Pad: 24 synthesized sounds on glowing toy-style pads, in an app window.
 
     uv run soundboard.py                          # Windows default output
-    uv run soundboard.py --out "Speakers (Bose"
+    uv run soundboard.py --out "Speakers (USB"
 
 Keys 123456 / QWERTY / ASDFGH / ZXCVBN play the pads (the grid's shape on the keyboard); Space stops all.
 The page is served on 127.0.0.1 only; closing the window ends the program.
