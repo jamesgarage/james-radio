@@ -2,10 +2,10 @@
 # requires-python = ">=3.10"
 # dependencies = ["sounddevice", "numpy"]
 # ///
-"""Super Sound Pad: 24 synthesized sounds on glowing toy-style pads, in an app window.
+"""James' Radio: 24 synthesized sounds on glowing toy-style pads, in an app window.
 
-    uv run soundboard.py                          # Windows default output
-    uv run soundboard.py --out "Speakers (USB"
+    uv run radio.py                               # Windows default output
+    uv run radio.py --out "Speakers (USB"
 
 Keys 123456 / QWERTY / ASDFGH / ZXCVBN play the pads (the grid's shape on the keyboard); Space stops all.
 The page is served on 127.0.0.1 only; closing the window ends the program.
@@ -492,7 +492,7 @@ def open_app_window(url):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Super Sound Pad: 24 sounds on glowing toy-style pads.")
+    p = argparse.ArgumentParser(description="James' Radio: 24 sounds on glowing toy-style pads.")
     p.add_argument("--out", default="", help="part of the output device's name (default: Windows default)")
     p.add_argument("--no-window", action="store_true", help="serve the page but don't open a window")
     a = p.parse_args()
@@ -507,7 +507,7 @@ def main():
     server, url, state = make_server(mixer, render())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=mixer.watch, daemon=True).start()
-    print(f"Super Sound Pad on {url} -> {device}", flush=True)
+    print(f"James' Radio on {url} -> {device}", flush=True)
     if not a.no_window:
         open_app_window(url)
 
@@ -527,11 +527,11 @@ def main():
     server.shutdown()
     server.server_close()
     mixer.close()
-    print("Window closed; Super Sound Pad stopped.", flush=True)
+    print("Window closed; James' Radio stopped.", flush=True)
 
 
 PAGE = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Super Sound Pad</title>
+<html lang="en"><head><meta charset="utf-8"><title>James' Radio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 html { font-size: min(1vw, 1.08vh); }   /* 1rem = one unit; the whole toy scales with the window */
@@ -554,7 +554,7 @@ body { margin: 0; height: 100vh; display: grid; place-items: center; overflow: h
 .s3 { bottom: 1.1rem; left: 1.1rem; --r: 80deg } .s4 { bottom: 1.1rem; right: 1.1rem; --r: 10deg }
 
 .top { display: flex; align-items: center; gap: 2.4rem; margin-bottom: 2.4rem; }
-.brand { color: #eef0f3; font-weight: 900; font-size: 3rem; letter-spacing: .06em; line-height: .95;
+.brand { margin: 0; color: #eef0f3; font-weight: 900; font-size: 3rem; letter-spacing: .06em; line-height: .95;
   text-shadow: 0 .15rem 0 #000, 0 -.08rem 0 rgba(255,255,255,.2); }
 .brand b { background: linear-gradient(90deg, #ff6161, #ffad45, #ffe65e, #66e680, #66b8ff, #c896ff);
   -webkit-background-clip: text; background-clip: text; color: transparent; text-shadow: none;
@@ -641,7 +641,7 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 3.6re
 <div class="device">
   <i class="screw s1"></i><i class="screw s2"></i><i class="screw s3"></i><i class="screw s4"></i>
   <div class="top">
-    <div class="brand">SUPER<br><b>SOUND PAD</b><small>MAKE SOME NOISE</small></div>
+    <h1 class="brand">JAMES'<br><b>RADIO</b><small>MAKE SOME NOISE</small></h1>
     <div class="lcd"><div id="now">PRESS A BUTTON &#9733;</div><div class="right"><div id="spk"></div><div class="meter" id="meter"></div></div></div>
   </div>
   <div class="pads" id="pads"></div>

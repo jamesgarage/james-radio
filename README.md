@@ -1,7 +1,8 @@
-# Super Sound Pad
+# James' Radio
 
-A toy soundboard for Windows: 24 synthesized sounds on big glowing pads. Every sound is generated with numpy
-when the program starts. There are no audio files and nothing is downloaded.
+James' Radio is a toy soundboard for Windows: 24 synthesized sounds on big glowing pads. Every sound is
+generated with numpy when the program starts, so there are no sound files. The only downloads are the ones uv
+makes on the first run (Python and two libraries, see Requirements).
 
 Tap a pad or press its key. The keys follow the grid's shape on the keyboard:
 
@@ -14,21 +15,21 @@ Tap a pad or press its key. The keys follow the grid's shape on the keyboard:
 
 **Space** (or Esc) stops all sounds. The page also has a STOP button, a volume fader (0-150%) and a level meter.
 
-Python plays the sound through one audio stream. The pad itself is a small web page served on 127.0.0.1 only,
-opened in a Microsoft Edge app window (or your default browser if Edge is missing). Closing the window ends the
-program.
+Python plays the sound through one audio stream. The radio itself is a small web page served on 127.0.0.1
+only, opened in a Microsoft Edge app window (or your default browser if Edge is missing). Closing the window
+ends the program.
 
 ## Requirements
 
 - Windows 10 or 11 (the sound goes through the Windows WASAPI audio API)
 - Python 3.10 or newer, run through [uv](https://docs.astral.sh/uv/getting-started/installation/). uv installs
-  Python and the two libraries (numpy, sounddevice) by itself.
+  Python and the two libraries (numpy, sounddevice) by itself on the first run.
 - A sound output: speakers or headphones
 
 ## Run
 
 ```
-uv run soundboard.py
+uv run radio.py
 ```
 
 Or double-click `Play.cmd`, which checks that uv is installed and then runs the same command. Any options you
@@ -37,8 +38,8 @@ give `Play.cmd` are passed on.
 Options:
 
 - `--out "<part of name>"` plays through the output device whose name contains that text, for example
-  `uv run soundboard.py --out "Speakers (USB"`. Without it, the pad uses the Windows default output. If the named
-  device is missing, the pad plays on the default output and checks every 5 seconds for the named one to return.
+  `uv run radio.py --out "Speakers (USB"`. Without it, the radio uses the Windows default output. If the named
+  device is missing, the radio plays on the default output and checks every 5 seconds for the named one to return.
 - `--no-window` serves the page but does not open a window. The program prints the address; open it within
   90 seconds, or the program exits.
 
@@ -66,11 +67,11 @@ or it will howl.
 
 ## Screenshot
 
-![Super Sound Pad](docs/screenshot.png)
+![James' Radio](docs/screenshot.png)
 
 ## Note
 
-Made for a three-year-old, shared as is.
+Made for James by his dad and AI, shared as is. More from his garage: [jamesgarage.github.io](https://jamesgarage.github.io/).
 
 ## License
 
