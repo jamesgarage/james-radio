@@ -466,9 +466,9 @@ class Mixer:
 
 
 # Pad colors per column: (top, bottom, side skirt, label text)
-RAINBOW = [("#ff6161", "#d81e1e", "#8e0f0f", "#fff"), ("#ffad45", "#f07800", "#9a4b00", "#fff"),
-           ("#ffe65e", "#f2c200", "#9c7a00", "#4a3500"), ("#66e680", "#1fae3f", "#146b28", "#fff"),
-           ("#66b8ff", "#1677e6", "#0d4a91", "#fff"), ("#c896ff", "#8a3ff0", "#561f9e", "#fff")]
+RAINBOW = [("#ff6161", "#d81e1e", "#8e0f0f", "#fff"), ("#ffad45", "#f07800", "#9a4b00", "#3d1d00"),
+           ("#ffe65e", "#f2c200", "#9c7a00", "#4a3500"), ("#66e680", "#12822d", "#0b5a1d", "#fff"),
+           ("#66b8ff", "#1268cc", "#0b4185", "#fff"), ("#c896ff", "#8a3ff0", "#561f9e", "#fff")]
 
 
 def make_server(mixer, sounds, radio):
