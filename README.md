@@ -45,6 +45,18 @@ Options:
 
 To find device names, list them with the microphone tool below: `uv run mic_echo.py --list`.
 
+## Plugins
+
+Extra buttons come from small Python files in `plugins/`; every one there is loaded at start. The radio ships
+with one:
+
+- **Call in** (`plugins/call_in.py`): a phone rings, a beep says "talk now", the microphone records five
+  seconds, and the radio plays a short station sting and then puts the caller on the air. With no microphone
+  the screen says so and nothing else happens.
+
+To write your own, see [docs/plugins.md](docs/plugins.md). Plugins never touch the network. Tests:
+`py -3 -m unittest discover -s tests`.
+
 ## Microphone echo (mic_echo.py)
 
 `mic_echo.py` plays a microphone straight out of an output device, so you hear yourself on the speaker. It

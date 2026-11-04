@@ -1,4 +1,4 @@
-"""Plugin system tests: discovery, skip-on-error and the API surface.
+"""Plugin system tests: discovery, skip-on-error, the API surface, and the shipped Call in plugin.
 
 Standard library only:  py -3 -m unittest discover -s tests
 """
@@ -63,6 +63,10 @@ class Discovery(unittest.TestCase):
         self.assertEqual([b.label for b in radio._buttons], ["A", "B"])
         self.assertEqual(lines, [])
 
+    def test_the_shipped_folder_loads_call_in(self):
+        radio, _, lines = make_radio()
+        self.assertIn("call_in", plugins.load_all(radio, log=lines.append))
+        self.assertEqual(lines, [])
 
 
 class SkipOnError(unittest.TestCase):
@@ -166,6 +170,29 @@ class ApiSurface(unittest.TestCase):
             threading.Event().wait(0.01)
         self.assertEqual(radio._message, (1, "Hello"))
 
+
+class CallIn(unittest.TestCase):
+    def load(self, mic):
+        radio, calls, lines = make_radio(mic)
+        plugins.load_all(radio, log=lines.append)
+        [button] = [b for b in radio._buttons if "Call in" in b.label]
+        return button, calls
+
+    def test_no_microphone_says_so_and_does_nothing_else(self):
+        button, calls = self.load(mic=False)
+        with mock.patch("time.sleep"):
+            self.assertEqual(button.on_press(), "No microphone")
+        self.assertEqual(calls.log, [("record", 0.0)])
+
+    def test_a_call_rings_records_five_seconds_and_plays_it_back(self):
+        button, calls = self.load(mic=True)
+        with mock.patch("time.sleep"):
+            self.assertEqual(button.on_press(), "You were on the air!")
+        kinds = [c[0] for c in calls.log]
+        self.assertEqual(calls.log[0], ("record", 0.0))
+        self.assertIn(("record", 5.0), calls.log)
+        self.assertLess(kinds.index("tone"), calls.log.index(("record", 5.0)))   # the ring comes first
+        self.assertEqual(calls.log[-1], ("play", 50))                            # the recording, last
 
 
 class NoNetwork(unittest.TestCase):
