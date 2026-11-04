@@ -420,10 +420,20 @@ def make_server(mixer, sounds):
            for i, ((n, e, s), k) in enumerate(zip(sounds, KEYS))]
     page = PAGE.replace("__CONFIG__", json.dumps(cfg)).replace("__TOKEN__", token).encode("utf-8")
     state = {"last_poll": None, "bye_at": None}
+    hosts = set()   # the only Host headers we answer, filled in once the port is known
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def parse_request(self):
+            # a web page that re-points its own domain at 127.0.0.1 (DNS rebinding) arrives with a foreign Host
+            if not super().parse_request():
+                return False
+            if self.headers.get("Host", "") not in hosts:
+                self._send(403)
+                return False
+            return True
 
         def _send(self, code, body=b"", ctype="text/plain"):
             self.send_response(code)
@@ -465,7 +475,9 @@ def make_server(mixer, sounds):
             self._send(204)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    return server, f"http://127.0.0.1:{server.server_address[1]}/", state
+    port = server.server_address[1]
+    hosts.update({f"127.0.0.1:{port}", f"localhost:{port}"})
+    return server, f"http://127.0.0.1:{port}/", state
 
 
 def open_app_window(url):
