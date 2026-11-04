@@ -339,12 +339,15 @@ class Mixer:
         if self.stream is not None:
             self.stream.close()
             self.stream = None
+        self.device = "No speaker"   # what the page shows until a stream opens
         sd._terminate()              # re-scan devices: PortAudio only knows the list from when it started
         sd._initialize()
         api = next(i for i, a in enumerate(sd.query_hostapis()) if a["name"] == "Windows WASAPI")
         wanted = [i for i, d in enumerate(sd.query_devices()) if self.out_part and d["hostapi"] == api
                   and d["max_output_channels"] > 0 and self.out_part.lower() in d["name"].lower()]
         dev = wanted[0] if wanted else sd.query_hostapis(api)["default_output_device"]
+        if dev < 0:
+            raise LookupError("Windows has no output device")
         self.fallback = bool(self.out_part) and not wanted
         ch = min(2, sd.query_devices(dev)["max_output_channels"])
         self.stream = sd.OutputStream(device=dev, samplerate=SR, channels=ch, dtype="float32", latency="low",
@@ -382,7 +385,10 @@ class Mixer:
     def play(self, snd):
         with self.open_lock:   # button presses arrive on several server threads at once
             if self.stream is None or not self.stream.active:
-                self._open()
+                try:
+                    self._open()
+                except Exception:
+                    return     # no speaker: drop the sound rather than queue a pile-up that all plays at once later
         with self.lock:
             self.voices.append((snd, 0))
 
@@ -469,7 +475,10 @@ def main():
     a = p.parse_args()
 
     mixer = Mixer(a.out)
-    device = mixer._open()
+    try:
+        device = mixer._open()
+    except Exception as e:   # no speaker yet: the page still opens and watch() keeps looking every 5 s
+        device = f"no speaker yet ({e})"
     server, url, state = make_server(mixer, render())
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=mixer.watch, daemon=True).start()
