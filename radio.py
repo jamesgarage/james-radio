@@ -25,6 +25,9 @@ from urllib.parse import parse_qs, urlsplit
 import numpy as np
 import sounddevice as sd
 
+import plugins
+from mic_echo import api_index, find   # the microphone lookup is mic_echo's, not a second copy
+
 SR = 48000
 rng = np.random.default_rng(7)
 
@@ -328,6 +331,38 @@ def render():
     return out
 
 
+def level(samples, most=60):
+    """Plugin audio: never louder than the pads; quiet recordings are raised at most 4x. None if silent."""
+    s = np.nan_to_num(np.asarray(samples, dtype=np.float32).ravel()[:SR * most], nan=0.0, posinf=0.0, neginf=0.0)
+    rms = float(np.sqrt(np.mean(s ** 2))) if len(s) else 0.0
+    return limit(s * min(TARGET_RMS / rms, 4.0)).astype(np.float32) if rms > 0 else None
+
+
+def soft_tone(freq, seconds):
+    """A plugin's sine: below the pads' loudness, click-free at both ends. None if too short to hear."""
+    if seconds < 0.01:
+        return None
+    x, edge = t(seconds), min(0.01, seconds / 4)
+    return (0.3 * np.sin(2 * np.pi * freq * x) * fade(len(x), edge, edge)).astype(np.float32)
+
+
+def plugin_radio(mixer, sounds):
+    """The plugin API object (plugins/__init__.py), wired to the real mixer and microphone."""
+    by_name = {name: snd for name, _, snd in sounds}
+
+    def play(sound):
+        snd = by_name[sound] if isinstance(sound, str) else level(sound)
+        if snd is not None:
+            mixer.play(snd)
+
+    def tone(freq, seconds):
+        snd = soft_tone(freq, seconds)
+        if snd is not None:
+            mixer.play(snd)
+
+    return plugins.Radio(by_name, play, tone, mixer.record)
+
+
 class Mixer:
     """One output stream; overlapping sounds are summed in the callback."""
 
@@ -387,14 +422,36 @@ class Mixer:
         outdata[:] = out[:, None]
 
     def play(self, snd):
-        with self.open_lock:   # button presses arrive on several server threads at once
-            if self.stream is None or not self.stream.active:
-                try:
-                    self._open()
-                except Exception:
-                    return     # no speaker: drop the sound rather than queue a pile-up that all plays at once later
+        if self.stream is None or not self.stream.active:   # a live stream needs no lock (record() may hold it)
+            with self.open_lock:   # button presses arrive on several server threads at once
+                if self.stream is None or not self.stream.active:
+                    try:
+                        self._open()
+                    except Exception:
+                        return     # no speaker: drop the sound rather than queue a pile-up that all plays later
         with self.lock:
             self.voices.append((snd, 0))
+
+    def record(self, seconds):
+        """Mono float32 samples from the default microphone; None when there is none. record(0) only checks."""
+        with self.open_lock:   # held throughout: a device re-scan in _open() would pull the mic from under the read
+            try:
+                mic = find("", "input", api_index("Windows WASAPI"))
+            except LookupError:
+                try:
+                    self._open()   # re-scan once: a mic plugged in after start is unknown until then
+                    mic = find("", "input", api_index("Windows WASAPI"))
+                except Exception:
+                    return None
+            if seconds <= 0:
+                return np.zeros(0, np.float32)
+            try:
+                with sd.InputStream(device=mic, samplerate=SR, channels=1, dtype="float32",
+                                    extra_settings=sd.WasapiSettings(auto_convert=True)) as stream:
+                    data, _ = stream.read(int(SR * seconds))
+            except sd.PortAudioError:
+                return None
+            return data[:, 0].copy()
 
     def stop_all(self):
         with self.lock:
@@ -414,12 +471,15 @@ RAINBOW = [("#ff6161", "#d81e1e", "#8e0f0f", "#fff"), ("#ffad45", "#f07800", "#9
            ("#66b8ff", "#1677e6", "#0d4a91", "#fff"), ("#c896ff", "#8a3ff0", "#561f9e", "#fff")]
 
 
-def make_server(mixer, sounds):
+def make_server(mixer, sounds, radio):
     token = secrets.token_urlsafe(16)   # only this page may press the buttons
     cfg = [{"name": n, "emoji": e, "key": k, "dur": round(len(s) / SR, 2),
             "c": RAINBOW[i % 6][0], "d": RAINBOW[i % 6][1], "e": RAINBOW[i % 6][2], "t": RAINBOW[i % 6][3]}
            for i, ((n, e, s), k) in enumerate(zip(sounds, KEYS))]
-    page = PAGE.replace("__CONFIG__", json.dumps(cfg)).replace("__TOKEN__", token).encode("utf-8")
+    extras = [{"label": b.label, "c": b.color} for b in radio._buttons]
+    as_js = lambda v: json.dumps(v).replace("<", "\\u003c")   # a label can never close the <script>
+    page = (PAGE.replace("__CONFIG__", as_js(cfg)).replace("__EXTRAS__", as_js(extras))
+            .replace("__TOKEN__", token).encode("utf-8"))
     state = {"last_poll": None, "bye_at": None}
     hosts = set()   # the only Host headers we answer, filled in once the port is known
 
@@ -451,7 +511,8 @@ def make_server(mixer, sounds):
             elif path == "/level":
                 state["last_poll"] = time.monotonic()   # the page's poll doubles as its heartbeat
                 self._send(200, json.dumps({"level": mixer.level, "speaker": mixer.device,
-                                            "volume": round(mixer.volume * 100)}).encode(), "application/json")
+                                            "volume": round(mixer.volume * 100),
+                                            "msg": list(radio._message)}).encode(), "application/json")
             else:
                 self._send(404)
 
@@ -463,6 +524,8 @@ def make_server(mixer, sounds):
             try:
                 if what == "play" and 0 <= int(arg) < len(sounds):
                     mixer.play(sounds[int(arg)][2])
+                elif what == "button" and 0 <= int(arg) < len(radio._buttons):
+                    radio._press(int(arg))
                 elif what == "stop":
                     mixer.stop_all()
                 elif what == "volume":
@@ -504,10 +567,13 @@ def main():
         device = mixer._open()
     except Exception as e:   # no speaker yet: the page still opens and watch() keeps looking every 5 s
         device = f"no speaker yet ({e})"
-    server, url, state = make_server(mixer, render())
+    sounds = render()
+    radio = plugin_radio(mixer, sounds)
+    loaded = plugins.load_all(radio)
+    server, url, state = make_server(mixer, sounds, radio)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=mixer.watch, daemon=True).start()
-    print(f"James' Radio on {url} -> {device}", flush=True)
+    print(f"James' Radio on {url} -> {device}; plugins: {', '.join(loaded) or 'none'}", flush=True)
     if not a.no_window:
         open_app_window(url)
 
@@ -633,6 +699,18 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 3.6re
   box-shadow: 0 .4rem .7rem rgba(0,0,0,.75), inset 0 .1rem 0 rgba(255,255,255,.6); }
 .ticks { display: flex; justify-content: space-between; padding: 0 1.4rem; color: #6c727c;
   font: 700 1.1rem Consolas, monospace; }
+.extras { display: flex; gap: 1.6rem; flex: none; }
+.extras:empty { display: none; }
+.extra { width: 11rem; height: 9.5rem; border: 0; border-radius: 1.6rem; cursor: pointer; color: #fff; padding: .6rem;
+  font: 900 1.5rem "Segoe UI", sans-serif; letter-spacing: .06em; text-transform: uppercase;
+  text-shadow: 0 .12rem .1rem rgba(0,0,0,.3);
+  background: radial-gradient(120% 70% at 50% 0%, rgba(255,255,255,.55), rgba(255,255,255,0) 60%),
+              linear-gradient(180deg, var(--c), color-mix(in srgb, var(--c) 75%, #000));
+  box-shadow: 0 .9rem 0 color-mix(in srgb, var(--c) 45%, #000), 0 1.2rem 1rem rgba(0,0,0,.55),
+              inset 0 .25rem 0 rgba(255,255,255,.45);
+  transform: translateY(-.9rem); transition: transform .05s, box-shadow .05s; }
+.extra.down { transform: translateY(-.1rem);
+  box-shadow: 0 .1rem 0 color-mix(in srgb, var(--c) 45%, #000), 0 .3rem .5rem rgba(0,0,0,.6), inset 0 .5rem 1rem rgba(0,0,0,.25); }
 .grille { width: 17rem; height: 9.5rem; border-radius: 1.4rem; flex: none;
   background: radial-gradient(circle, #050506 40%, transparent 46%) 0 0 / 1.2rem 1.2rem, linear-gradient(#2c2f36, #24272d);
   box-shadow: inset 0 .3rem .6rem rgba(0,0,0,.8), 0 .1rem 0 rgba(255,255,255,.1); }
@@ -652,11 +730,12 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 3.6re
       <input id="vol" type="range" min="0" max="150" value="100">
       <div class="ticks"><span>0</span><span>50</span><span>100</span><span>150</span></div>
     </div>
+    <div class="extras" id="extras"></div>
     <div class="grille"></div>
   </div>
 </div>
 <script>
-const SOUNDS = __CONFIG__, TOKEN = "__TOKEN__";
+const SOUNDS = __CONFIG__, EXTRAS = __EXTRAS__, TOKEN = "__TOKEN__";
 const post = (path) => fetch(`${path}?t=${TOKEN}`, { method: "POST" }).catch(() => {});
 const now = document.getElementById("now"), pads = document.getElementById("pads");
 let idle;
@@ -695,6 +774,15 @@ function stopAll() {
   SOUNDS.forEach((s, i) => { clearTimeout(lit[i]); s.well.classList.remove("lit"); });
   show("✋ STOP");
 }
+const extras = document.getElementById("extras");
+EXTRAS.forEach((x, i) => {   // plugin buttons (plugins/*.py); textContent, so a label is never HTML
+  const b = document.createElement("button");
+  b.className = "extra";
+  b.style.setProperty("--c", x.c);
+  b.textContent = x.label;
+  b.addEventListener("pointerdown", (e) => { e.preventDefault(); b.classList.add("down"); post(`/button/${i}`); show(x.label); });
+  extras.append(b);
+});
 const stop = document.getElementById("stop");
 stop.addEventListener("pointerdown", (e) => { e.preventDefault(); stop.classList.add("down"); stopAll(); });
 const release = () => document.querySelectorAll(".down").forEach((el) => el.classList.remove("down"));
@@ -724,11 +812,13 @@ vol.addEventListener("input", () => {
 
 const meter = document.getElementById("meter"), spk = document.getElementById("spk");
 const segs = Array.from({ length: 16 }, () => meter.appendChild(document.createElement("i")));
-let shown = 0, synced = false;
+let shown = 0, synced = false, seen = -1;
 async function poll() {
   try {
-    const { level, speaker, volume } = await (await fetch("/level")).json();
+    const { level, speaker, volume, msg } = await (await fetch("/level")).json();
     if (!synced) { vol.value = volume; volout.textContent = `${volume}%`; synced = true; }   // a reload keeps the app's volume
+    if (seen >= 0 && msg[0] !== seen) show(msg[1]);   // a plugin button's reply, e.g. "No microphone"
+    seen = msg[0];
     spk.textContent = "\u{1F50A} " + ((speaker.match(/\(([^)]+)\)/) || [, speaker])[1]).replace(/^\d+- /, "");
     shown = Math.max(Math.round(Math.min(1, Math.sqrt(level) * 1.6) * segs.length), shown - 1);
     segs.forEach((g, k) => g.classList.toggle("on", k < shown));
