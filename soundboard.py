@@ -15,6 +15,7 @@ import json
 import os
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -495,6 +496,8 @@ def main():
     p.add_argument("--out", default="", help="part of the output device's name (default: Windows default)")
     p.add_argument("--no-window", action="store_true", help="serve the page but don't open a window")
     a = p.parse_args()
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")   # redirected output is cp1252; a device name may not fit it
 
     mixer = Mixer(a.out)
     try:
