@@ -16,8 +16,9 @@ Tap a pad or press its key. The keys follow the grid's shape on the keyboard:
 **Space** (or Esc) stops all sounds. The page also has a STOP button, a volume fader (0-150%) and a level meter.
 
 Python plays the sound through one audio stream. The radio itself is a small web page served on 127.0.0.1
-only, opened in a Microsoft Edge app window (or your default browser if Edge is missing). Closing the window
-ends the program.
+only (unless you share it with a phone, below), opened in a Microsoft Edge app window (or your default browser
+if Edge is missing). Closing the window ends the program. The page fits a laptop screen in one piece and a phone
+or tablet in either orientation.
 
 ## Requirements
 
@@ -41,9 +42,27 @@ Options:
   `uv run radio.py --out "Speakers (USB"`. Without it, the radio uses the Windows default output. If the named
   device is missing, the radio plays on the default output and checks every 5 seconds for the named one to return.
 - `--no-window` serves the page but does not open a window. The program prints the address; open it within
-  90 seconds, or the program exits.
+  90 seconds (5 minutes with `--share`), or the program exits.
+- `--share` also lets phones and tablets on the same Wi-Fi play the radio; see below.
 
 To find device names, list them with the microphone tool below: `uv run mic_echo.py --list`.
+
+## Play from a phone or tablet
+
+Double-click `Play on Wi-Fi.cmd` (or run `uv run radio.py --share`). The radio opens on the PC as usual, and its
+console window prints an address like `http://192.168.0.42:8481/`. Open that address in the browser of a phone
+or tablet on the same Wi-Fi. On an iPhone or iPad, Share > Add to Home Screen gives it an icon; the address stays
+the same as long as the PC keeps its network address.
+
+- The phone is a remote control. The sound comes out of the PC, and Call in records with the PC's microphone.
+- It only works while James' Radio is open on the PC. Close the radio's window on the PC and it stops for
+  every phone.
+- Nothing leaves the home network. The radio listens on the PC's home-network address only, has no accounts and
+  sends nothing to the internet. Anyone on the same Wi-Fi who opens the address can press the buttons.
+- The first time, Windows may ask whether Python may use the network: allow **Private networks** only. Don't
+  share on a public or guest network.
+- On a PC with several network adapters the radio may pick the wrong address. Name the right one:
+  `uv run radio.py --share 192.168.0.42`. Without `--share`, only the PC itself can open the radio.
 
 ## Plugins
 

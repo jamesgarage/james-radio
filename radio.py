@@ -6,14 +6,18 @@
 
     uv run radio.py                               # Windows default output
     uv run radio.py --out "Speakers (USB"
+    uv run radio.py --share                       # phones and tablets on the same Wi-Fi can play it too
 
 Keys 123456 / QWERTY / ASDFGH / ZXCVBN play the pads (the grid's shape on the keyboard); Space stops all.
-The page is served on 127.0.0.1 only; closing the window ends the program.
+The page is served on 127.0.0.1 only, unless --share asks for the home network too; closing the window ends
+the program.
 """
 import argparse
+import ipaddress
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -471,7 +475,39 @@ RAINBOW = [("#ff6161", "#d81e1e", "#8e0f0f", "#fff"), ("#ffad45", "#f07800", "#9
            ("#66b8ff", "#1268cc", "#0b4185", "#fff"), ("#c896ff", "#8a3ff0", "#561f9e", "#fff")]
 
 
-def make_server(mixer, sounds, radio):
+SHARE_PORT = 8481   # fixed, so a phone's bookmark keeps working from one run to the next
+HOME_NETS = [ipaddress.ip_network(n) for n in ("192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12")]   # best first
+
+
+def lan_address():
+    """This PC's address on the home network, or None. 192.168.x wins over 10.x, and 172.16-31.x comes last
+    because that is where VPNs and virtual adapters usually sit."""
+    try:
+        found = sorted({ipaddress.ip_address(a) for a in socket.gethostbyname_ex(socket.gethostname())[2]})
+    except OSError:
+        return None
+    return next((str(a) for net in HOME_NETS for a in found if a in net), None)
+
+
+def share_address(asked):
+    """The address --share listens on: the one asked for if it is a home-network or loopback IPv4 address,
+    else this PC's own; raises ValueError with a sentence to show."""
+    if asked == "auto":
+        found = lan_address()
+        if not found:
+            raise ValueError("no home-network address found on this PC. Is it on Wi-Fi? "
+                             "If it is, name the address: --share 192.168.0.42")
+        return found
+    try:
+        ip = ipaddress.IPv4Address(asked)
+    except ValueError:
+        raise ValueError(f"--share wants an address like 192.168.0.42, not {asked!r}") from None
+    if not (ip.is_loopback or any(ip in net for net in HOME_NETS)):
+        raise ValueError(f"{asked} is not a home-network address (192.168.x.x, 10.x.x.x or 172.16-31.x.x)")
+    return asked
+
+
+def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
     token = secrets.token_urlsafe(16)   # only this page may press the buttons
     cfg = [{"name": n, "emoji": e, "key": k, "dur": round(len(s) / SR, 2),
             "c": RAINBOW[i % 6][0], "d": RAINBOW[i % 6][1], "e": RAINBOW[i % 6][2], "t": RAINBOW[i % 6][3]}
@@ -480,7 +516,7 @@ def make_server(mixer, sounds, radio):
     as_js = lambda v: json.dumps(v).replace("<", "\\u003c")   # a label can never close the <script>
     page = (PAGE.replace("__CONFIG__", as_js(cfg)).replace("__EXTRAS__", as_js(extras))
             .replace("__TOKEN__", token).encode("utf-8"))
-    state = {"last_poll": None, "bye_at": None}
+    state = {"last_poll": None, "pc_poll": None, "bye_at": None}
     hosts = set()   # the only Host headers we answer, filled in once the port is known
 
     class Handler(BaseHTTPRequestHandler):
@@ -496,6 +532,10 @@ def make_server(mixer, sounds, radio):
                 return False
             return True
 
+        def _from_pc(self):
+            # the PC's own window; with --share the PC reaches its home-network address from that same address
+            return self.client_address[0] in ("127.0.0.1", address)
+
         def _send(self, code, body=b"", ctype="text/plain"):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -510,6 +550,8 @@ def make_server(mixer, sounds, radio):
                 self._send(200, page, "text/html; charset=utf-8")
             elif path == "/level":
                 state["last_poll"] = time.monotonic()   # the page's poll doubles as its heartbeat
+                if self._from_pc():
+                    state["pc_poll"] = state["last_poll"]
                 self._send(200, json.dumps({"level": mixer.level, "speaker": mixer.device,
                                             "volume": round(mixer.volume * 100),
                                             "msg": list(radio._message)}).encode(), "application/json")
@@ -531,17 +573,23 @@ def make_server(mixer, sounds, radio):
                 elif what == "volume":
                     mixer.volume = max(0.0, min(float(arg), 150.0)) / 100
                 elif what == "bye":
-                    state["bye_at"] = time.monotonic()
+                    if self._from_pc():                 # a phone closing its tab does not stop the radio
+                        state["bye_at"] = time.monotonic()
                 else:
                     return self._send(404)
             except ValueError:
                 return self._send(400)
             self._send(204)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    try:
+        server = ThreadingHTTPServer((address, port), Handler)
+    except OSError:
+        if not port:
+            raise
+        server = ThreadingHTTPServer((address, 0), Handler)   # the usual port is taken: any free one
     port = server.server_address[1]
-    hosts.update({f"127.0.0.1:{port}", f"localhost:{port}"})
-    return server, f"http://127.0.0.1:{port}/", state
+    hosts.update({f"127.0.0.1:{port}", f"localhost:{port}", f"{address}:{port}"})
+    return server, f"http://{address}:{port}/", state
 
 
 def open_app_window(url):
@@ -558,7 +606,16 @@ def main():
     p = argparse.ArgumentParser(description="James' Radio: 24 sounds on glowing toy-style pads.")
     p.add_argument("--out", default="", help="part of the output device's name (default: Windows default)")
     p.add_argument("--no-window", action="store_true", help="serve the page but don't open a window")
+    p.add_argument("--share", nargs="?", const="auto", metavar="ADDRESS",
+                   help="also serve the radio to phones and tablets on the home network (this PC's address, "
+                        "or the one given); without it only this PC can open it")
     a = p.parse_args()
+    address = "127.0.0.1"
+    if a.share:
+        try:
+            address = share_address(a.share)
+        except ValueError as e:
+            sys.exit(f"James' Radio: {e}")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")   # redirected output is cp1252; a device name may not fit it
 
@@ -570,10 +627,17 @@ def main():
     sounds = render()
     radio = plugin_radio(mixer, sounds)
     loaded = plugins.load_all(radio)
-    server, url, state = make_server(mixer, sounds, radio)
+    try:
+        server, url, state = make_server(mixer, sounds, radio, address, SHARE_PORT if a.share else 0)
+    except OSError as e:
+        mixer.close()
+        sys.exit(f"James' Radio: cannot listen on {address}: {e.strerror or e}")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=mixer.watch, daemon=True).start()
     print(f"James' Radio on {url} -> {device}; plugins: {', '.join(loaded) or 'none'}", flush=True)
+    if a.share:
+        print(f"On a phone or tablet on the same Wi-Fi, open {url}\n"
+              "The sound plays on this PC. Closing the radio's window here stops it for everyone.", flush=True)
     if not a.no_window:
         open_app_window(url)
 
@@ -581,13 +645,13 @@ def main():
     try:
         while True:
             time.sleep(1)
-            now, last, bye = time.monotonic(), state["last_poll"], state["bye_at"]
-            if bye and (last is None or last < bye) and now - bye > 3:
-                break                               # window closed (a reload polls again within 3 s)
+            now, last, pc, bye = time.monotonic(), state["last_poll"], state["pc_poll"], state["bye_at"]
+            if bye and (pc is None or pc < bye) and now - bye > 3:
+                break                               # the PC's window closed (a reload polls again within 3 s)
             if last and now - last > 150:
-                break                               # page gone without saying bye (minimized pages poll slowly)
-            if last is None and now - started > 90:
-                break                               # page never opened
+                break                               # every page gone without saying bye (minimized pages poll slowly)
+            if last is None and now - started > (300 if a.share else 90):
+                break                               # page never opened (a phone needs longer to type the address)
     except KeyboardInterrupt:
         pass                                        # Ctrl+C in the console window: stop the same clean way
     server.shutdown()
