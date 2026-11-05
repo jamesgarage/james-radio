@@ -2,18 +2,21 @@
 # requires-python = ">=3.10"
 # dependencies = ["sounddevice", "numpy"]
 # ///
-"""James' Radio: 24 synthesized sounds on glowing toy-style pads, in an app window.
+"""James' Radio: 24 synthesized sounds on glowing toy-style pads, and a STATION page of radio drops, in an app window.
 
     uv run radio.py                               # Windows' default output, followed when it changes
     uv run radio.py --out "Speakers (USB"
     uv run radio.py --share                       # phones and tablets on the same Wi-Fi can play it too
 
-Keys 123456 / QWERTY / ASDFGH / ZXCVBN play the pads (the grid's shape on the keyboard); Space stops all;
+Keys 123456 / QWERTY / ASDFGH / ZXCVBN play the pads (the grid's shape on the keyboard) of the page you see; a
+sideways swipe, the page tabs or the arrow keys turn to the other page; Space stops all;
 the PC's microphone is on the air (through the radio's speaker) while the radio runs, and M or the MIC pad mutes it.
 The page is served on 127.0.0.1 only, unless --share asks for the home network too; closing the window ends
 the program.
 """
 import argparse
+import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -24,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -326,14 +330,295 @@ def limit(y):
     return np.where(a < 0.8, y, np.sign(y) * (0.8 + 0.2 * np.tanh((a - 0.8) / 0.2)))
 
 
+def loud(s):
+    """Peak to 1, then about TARGET_RMS: every pad gets the same loudness, not just the same peak."""
+    s = s / np.max(np.abs(s))
+    return limit(s * min(TARGET_RMS / np.sqrt(np.mean(s ** 2)), 5))   # sparse sounds (claps, bells, the blast) get pushed up
+
+
 def render():
-    out = []
-    for name, picture, make in SOUNDS:
-        s = make()
-        s = s / np.max(np.abs(s))
-        gain = min(TARGET_RMS / np.sqrt(np.mean(s ** 2)), 5)   # sparse sounds (claps, bells, the blast) get pushed up
-        out.append((name, picture, limit(s * gain).astype(np.float32)))
+    return [(name, picture, loud(make()).astype(np.float32)) for name, picture, make in SOUNDS]
+
+
+# The STATION page: a radio station's drops. Every sting is synthesized like the pads; the words are said by
+# Windows' own speech voice, made once and kept in cache/ (see station_voices).
+
+def hz(midi):
+    """A MIDI note's frequency (60 is middle C)."""
+    return 440 * 2 ** ((midi - 69) / 12)
+
+
+def pluck(f, sec, decay=5.0):
+    """A struck note (marimba, music box): bright at the strike, then dying away."""
+    x = t(sec)
+    return (sum(np.sin(2 * np.pi * f * k * x) * np.exp(-x * decay * k) / k ** 1.5 for k in (1, 2, 3, 4))
+            * fade(len(x), 0.002, 0.05))
+
+
+def tune(notes, beat, play):
+    """A melody: (MIDI note, or None for a rest; length in beats) in order, each note made by play(freq, seconds)."""
+    out = np.zeros(int(SR * (beat * sum(b for _, b in notes) + 1.5)))   # room for the last note to ring
+    at = 0.0
+    for m, b in notes:
+        if m is not None:
+            place(out, play(hz(m), b * beat), at)
+        at += b * beat
     return out
+
+
+def station_id():
+    """Three notes climbing to the chord they make, with a sparkle on top: the station's logo."""
+    out = np.zeros(int(SR * 2.6))
+    for k, m in enumerate((72, 76, 79)):
+        place(out, pluck(hz(m), 0.9, 4) * 0.6, k * 0.14)
+    place(out, chord([hz(m) for m in (72, 76, 79, 84)], 2.0, 0.01) * 0.5, 0.42)
+    place(out, bell(hz(96), 1.6, 3) * 0.2, 0.42)
+    return out
+
+
+def sponsors():
+    """A cheesy word-from-our-sponsors tune on an oom-pah bass, ending on a bright chord and a cash register."""
+    beat = 0.17
+    out = tune([(72, 1), (74, 1), (76, 1), (79, 2), (76, 1), (79, 1), (84, 4)], beat,
+               lambda f, sec: note(f, sec * 0.9) * 0.35 + pluck(2 * f, sec * 0.9, 6) * 0.25)
+    place(out, tune([(48, 1), (55, 1), (48, 1), (55, 1), (53, 1), (55, 1), (48, 4)], beat,
+                    lambda f, sec: pluck(f, min(sec, 0.6), 5)) * 0.7, 0)
+    place(out, chord([hz(m) for m in (72, 76, 79, 84)], 1.0) * 0.3, 7 * beat)
+    place(out, cha_ching() * 0.5, 7 * beat + 0.25)
+    return out
+
+
+def music():
+    """Twelve seconds of upbeat chiptune pop (C, G, A minor, F, twice round) made to go round without a seam."""
+    beat = 0.375   # 160 beats a minute
+    bars = [(36, (60, 64, 67)), (43, (59, 62, 67)), (45, (57, 60, 64)), (41, (57, 60, 65))] * 2   # (bass, chord)
+    lead = [76, 79, 84, 79, 74, 79, 83, 79, 72, 76, 81, 76, 72, 77, 81, 84,
+            84, 83, 79, 76, 74, 79, 74, 71, 72, 76, 72, 69, 72, 74, 76, 79]
+    kick, hat = drum(55, 0.25) * 0.9, bandpass(noise_hit(0.03, 0.006), 6000, 12000) * 0.25
+    snare = noise_hit(0.18, 0.05) * 0.45 + drum(190, 0.18) * 0.3
+    n = int(SR * beat * 4 * len(bars))
+    out = np.zeros(n + 2 * SR)
+    for k, (bass, triad) in enumerate(bars):
+        bar = k * 4 * beat
+        for e in range(8):   # eighth notes: the bass jumping an octave, the hi-hat, the chord on the off-beats
+            at = bar + e * beat / 2
+            place(out, pluck(hz(bass + 12 * (e % 2)), 0.18, 6) * 0.7, at)
+            place(out, hat, at)
+            if e % 2:
+                place(out, sum(pluck(hz(m), 0.14, 8) for m in triad) / 3 * 0.45, at)
+        for q in range(4):
+            place(out, kick if q % 2 == 0 else snare, bar + q * beat)
+            place(out, note(hz(lead[k * 4 + q]), beat * 0.85, 0.005) * 0.32, bar + q * beat)
+    body = out[:n].copy()
+    body[:2 * SR] += out[n:]   # what still rings at the end rings on into the start: the join is not heard
+    return body
+
+
+def storm():
+    """Rain on the window and the wind, then a roll of thunder."""
+    sec = 5.0
+    x = t(sec)
+    out = bandpass(rng.standard_normal(len(x)), 2000, 9000)
+    out = out / np.max(np.abs(out)) * 0.18   # the hiss of rain
+    for at in rng.uniform(0, sec - 0.05, 160):   # and its drops
+        place(out, bandpass(noise_hit(0.02, 0.003), 1500, 7000) * rng.uniform(0.1, 0.4), at)
+    wind = bandpass(rng.standard_normal(len(x)), 250, 900)
+    out += wind / np.max(np.abs(wind)) * (0.25 + 0.2 * np.sin(2 * np.pi * 0.35 * x))
+    y = t(2.4)
+    rumble = lowpass(rng.standard_normal(len(y)), 200)
+    place(out, rumble / np.max(np.abs(rumble)) * np.minimum(1, y / 0.05) * np.exp(-y * 1.3) * 1.2, 2.6)
+    place(out, noise_hit(0.2, 0.04) * 0.5, 2.6)   # the crack
+    return out * fade(len(out), 0.4, 0.8)
+
+
+def breaking_news():
+    """A whoosh rising into a big low hit, then an alert beeping."""
+    out = np.zeros(int(SR * 2.8))
+    x = t(0.7)
+    riser = bandpass(rng.standard_normal(len(x)), 700, 6000)
+    place(out, riser / np.max(np.abs(riser)) * (x / 0.7) ** 2 * 0.6, 0)
+    place(out, drum(48, 1.2), 0.7)
+    place(out, noise_hit(0.8, 0.18) * 0.5, 0.7)
+    place(out, chord([hz(m) for m in (45, 52, 57, 60)], 1.4) * 0.7, 0.7)   # A minor, low
+    y = t(0.1)
+    for k in range(6):
+        beep = np.sign(np.sin(2 * np.pi * (988 if k % 2 == 0 else 784) * y)) * fade(len(y), 0.003, 0.01)
+        place(out, beep * 0.25, 1.15 + k * 0.2)
+    return out
+
+
+def goodnight_chime():
+    """A soft chime: three bells, gently down."""
+    out = np.zeros(int(SR * 3.4))
+    for k, m in enumerate((76, 72, 67)):   # E, C, G
+        place(out, bell(hz(m), 2.2, 1.6) * 0.5, k * 0.45)
+    return out
+
+
+# (name, picture, sound, what the station voice says or None, when the voice comes in: seconds into the sound with
+# the sound dipping under it; None: the voice first, then the sound; "loop": the voice first, then the sound goes
+# round until STOP). A sound given by name is that pad of the Sounds page.
+STATION = [("Station ID", "📻", station_id, "You're listening to James' Radio!", 0.8),
+           ("Sponsors", "💸", sponsors, "And now, our sponsors!", None),
+           ("Music", "🎵", music, "Here's some music!", "loop"),
+           ("Weather", "⛈️", storm, "Here's the weather", 0.4),
+           ("Breaking news", "📰", breaking_news, "Breaking news!", 1.05),
+           ("Applause", "👏", "Applause", None, None),
+           ("Sign off", "🌙", goodnight_chime, "That's all for today, goodnight!", None)]
+# The pages, in order: (name, picture, how many pads of the sound list, where on it the plugin buttons that ask for
+# it go: None = after its pads). On STATION, Phone call (plugins/call_in.py) comes after Breaking news.
+PAGES = [("Sounds", "🎛️", len(SOUNDS), None), ("Station", "📡", len(STATION), 5)]
+
+
+def trim(s, floor=0.01):
+    """Without the quiet before and after: a speech file has some at both ends, a tune its last note's room."""
+    on = np.flatnonzero(np.abs(s) > floor * np.max(np.abs(s)))
+    if not len(on):
+        return s
+    s = s[max(0, on[0] - SR // 50):on[-1] + SR // 10]
+    return s * fade(len(s), 0.005, 0.05)
+
+
+def on_air(voice):
+    """A voice clip ready for the air: a little radio-sounding, and as loud as a pad."""
+    return loud(trim(bandpass(voice, 100, 7000)))
+
+
+def station_pad(sting, voice=None, at=None):
+    """A STATION pad's sound: the sting and the voice. at: seconds into the sting that the voice comes in, the sting
+    dipping to 30% under it and coming back up after; None: the voice first, then the sting."""
+    s = loud(trim(sting))
+    if voice is None:
+        return s.astype(np.float32)
+    v = on_air(voice)
+    if at is None:
+        return np.concatenate([v, np.zeros(SR // 10), s]).astype(np.float32)
+    i, ramp = int(SR * at), SR // 10
+    out = np.zeros(max(len(s), i + len(v) + SR // 5))
+    k = np.arange(len(s))
+    under = np.clip((k - (i - ramp)) / ramp, 0, 1) * (1 - np.clip((k - (i + len(v))) / ramp, 0, 1))
+    out[:len(s)] = s * (1 - 0.7 * under)
+    out[i:i + len(v)] += v
+    return limit(out).astype(np.float32)
+
+
+class Loop:
+    """A sound that goes round until it is stopped: the intro once, then the body again and again (a body made so
+    its end runs on into its start, like music())."""
+
+    def __init__(self, intro, body):
+        self.intro, self.body = intro, body
+
+    def __len__(self):   # once through
+        return len(self.intro) + len(self.body)
+
+    def chunk(self, pos, n):
+        """The n samples from pos on; pos counts from the start of the intro."""
+        k, a = np.arange(pos, pos + n), len(self.intro)
+        body = self.body[(k - a) % len(self.body)]
+        return (np.where(k < a, self.intro[np.minimum(k, a - 1)], body) if a else body).astype(np.float32)
+
+
+def render_station(clips, sounds=()):
+    """The STATION page's pads, (name, picture, sound) like render()'s. clips holds the voices (station_voices);
+    sounds are the Sounds page's rendered pads, for a STATION pad that is one of them."""
+    rendered, makers = {n: s for n, _, s in sounds}, {n: make for n, _, make in SOUNDS}
+    out = []
+    for name, picture, make, words, at in STATION:
+        voice = clips.get(words) if words else None
+        if isinstance(make, str):
+            snd = rendered[make] if make in rendered else loud(makers[make]()).astype(np.float32)
+        elif at == "loop":
+            intro = np.zeros(0) if voice is None else np.concatenate([on_air(voice), np.zeros(SR // 5)])
+            snd = Loop(intro.astype(np.float32), loud(make()).astype(np.float32))
+        else:
+            snd = station_pad(make(), voice, at)
+        out.append((name, picture, snd))
+    return out
+
+
+CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+SPEECH = "Windows speech, 48 kHz 16-bit mono"   # part of each clip's file name: change it and they are made again
+
+
+def voice_file(words, folder=CACHE):
+    """Where the station voice saying `words` is kept."""
+    return os.path.join(folder, "voice-" + hashlib.sha1(f"{SPEECH}|{words}".encode()).hexdigest()[:16] + ".wav")
+
+
+def read_wav(path):
+    """A WAV file's sound as mono float32 at SR; raises if it is missing, damaged, empty or silent."""
+    with wave.open(path, "rb") as w:
+        channels, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+        raw = w.readframes(w.getnframes())
+    if width == 2:
+        x = np.frombuffer(raw, "<i2") / 32768
+    elif width == 1:
+        x = (np.frombuffer(raw, np.uint8).astype(float) - 128) / 128
+    else:
+        raise ValueError(f"{width * 8}-bit WAV")
+    x = x[:len(x) // channels * channels].reshape(-1, channels).mean(axis=1)
+    if rate != SR:
+        x = np.interp(np.arange(int(len(x) * SR / rate)) * rate / SR, np.arange(len(x)), x)
+    if not np.any(x):
+        raise ValueError("no sound in it")
+    return x.astype(np.float32)
+
+
+def speech_script(jobs):
+    """The Windows PowerShell that speaks each (words, path) into its WAV file. Into files only: nothing is played."""
+    data = json.dumps([{"text": w, "path": p} for w, p in jobs]).replace("'", "''")   # a '...' string: '' is one '
+    return ("$ErrorActionPreference = 'Stop'\n"
+            "Add-Type -AssemblyName System.Speech\n"
+            f"$jobs = '{data}' | ConvertFrom-Json\n"
+            "$format = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(48000, "
+            "[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)\n"
+            "$s = [System.Speech.Synthesis.SpeechSynthesizer]::new()\n"
+            "try { foreach ($j in $jobs) { $s.SetOutputToWaveFile($j.path, $format); $s.Speak($j.text) } }\n"
+            "finally { $s.SetOutputToNull(); $s.Dispose() }\n")
+
+
+def windows_speech(jobs):
+    """Speak each (words, path) into a WAV file with Windows' built-in voice (System.Speech, which needs Windows
+    PowerShell 5.1); raises if it cannot. Nothing comes out of a speaker."""
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}   # PowerShell 7's breaks 5.1's modules
+    subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                    base64.b64encode(speech_script(jobs).encode("utf-16-le")).decode()],
+                   env=env, check=True, capture_output=True, timeout=120,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def station_voices(words, folder=CACHE, speak=windows_speech, before=None):
+    """The station voice saying each of `words`: made with speak() the first time, all in one go, and read back
+    from folder after that. None for any it could not make (no speech on this PC): those pads play the sting
+    alone. before(n) is told first when n clips have to be made."""
+    clips, todo = {}, []
+    for w in words:
+        try:
+            clips[w] = read_wav(voice_file(w, folder))
+        except Exception:   # not made yet, or damaged: make it (again)
+            todo.append(w)
+    if not todo:
+        return clips
+    if before:
+        before(len(todo))
+    parts = [(w, voice_file(w, folder) + ".part") for w in todo]   # under another name until it reads back whole,
+    try:                                                           # so a run cut short leaves no broken clip
+        os.makedirs(folder, exist_ok=True)
+        speak(parts)
+    except Exception:
+        pass
+    for w, part in parts:
+        try:
+            clips[w] = read_wav(part)
+            os.replace(part, part[:-len(".part")])
+        except Exception:
+            clips[w] = None
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+    return clips
 
 
 def level(samples, most=60):
@@ -552,6 +837,7 @@ class Mixer:
 
     def __init__(self, out_part, default_id=windows_default_speaker, mic_default_id=windows_default_mic):
         self.voices, self.lock, self.volume, self.stream = [], threading.Lock(), 1.0, None
+        self.music = None   # (Loop, position) while the music goes round
         self.level, self.open_lock, self.device, self.fallback = 0.0, threading.Lock(), "", False
         self.closed = False
         self.pin, self.pin_exact = out_part or None, False   # stay on this speaker (part of its name); None: follow
@@ -790,6 +1076,10 @@ class Mixer:
                 if pos + frames < len(snd):
                     still.append((snd, pos + frames))
             self.voices = still
+            if self.music is not None:
+                loop, pos = self.music
+                mix += loop.chunk(pos, frames)
+                self.music = (loop, pos + frames)
         voice = None
         if self.mic_live:
             voice = self.ring.read(frames)
@@ -826,10 +1116,20 @@ class Mixer:
         return True
 
     def play(self, snd):
+        """Start a sound; sounds overlap. A Loop is the music: it goes round until stop_all() or the next Loop played,
+        which stops it instead."""
+        if isinstance(snd, Loop):
+            with self.lock:
+                if self.music is not None:
+                    self.music = None
+                    return
         if not self._ready():
             return     # no speaker: drop the sound rather than queue a pile-up that all plays later
         with self.lock:
-            self.voices.append((snd, 0))
+            if isinstance(snd, Loop):
+                self.music = (snd, 0)
+            else:
+                self.voices.append((snd, 0))
 
     def record(self, seconds):
         """Mono float32 samples from the microphone (the one picked on the page, else Windows' default); None when
@@ -856,7 +1156,7 @@ class Mixer:
 
     def stop_all(self):
         with self.lock:
-            self.voices = []
+            self.voices, self.music = [], None
 
     def close(self):
         with self.open_lock:   # not halfway through watch() swapping streams
@@ -918,14 +1218,54 @@ class Server(ThreadingHTTPServer):
         super().server_bind()
 
 
-def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
+def pad_config(sounds, pages, buttons=()):
+    """The pads as the page draws them. pages lists (name, picture, how many pads, where on it its plugin buttons go
+    or None for the end) in order, and each page takes the next pads of sounds; buttons are those plugin buttons,
+    (index, page name, label, colour). A page of eight pads or fewer has them four to a row, the others six; the
+    keys follow the rows (123456 / QWERTY / ASDFGH / ZXCVBN) and the colours go round the rainbow. A sound pad plays
+    its place in sounds (POST /play/<i>), a button pad presses its button (POST /button/<k>)."""
+    if sum(count for _, _, count, _ in pages) != len(sounds):
+        raise ValueError("the pages do not add up to the sounds")
+    cfg, first = [], 0
+    for p, (title, _, count, slot) in enumerate(pages):
+        pads = [{"i": first + j} for j in range(count)]
+        mine = [{"button": k, "label": label, "c": color} for k, page, label, color in buttons
+                if page.lower() == title.lower()]
+        at = count if slot is None else min(slot, count)
+        pads[at:at] = mine
+        width = 4 if len(pads) <= 8 else 6
+        for j, pad in enumerate(pads):
+            row, col = divmod(j, width)
+            pad.update({"page": p, "key": KEYS[row * 6 + col] if row < 4 else ""})
+            if "i" in pad:
+                name, emoji, snd = sounds[pad["i"]]
+                top, bottom, skirt, text = RAINBOW[j % 6]
+                pad.update({"name": name, "emoji": emoji, "dur": round(len(snd) / SR, 2),
+                            "loop": isinstance(snd, Loop), "c": top, "d": bottom, "e": skirt, "t": text})
+        cfg += pads
+        first += count
+    return cfg
+
+
+def make_server(mixer, sounds, radio, address="127.0.0.1", port=0, pages=None, voiceless=()):
+    """pages: see pad_config (default: all the sounds on one page); voiceless: the sounds whose voice could not be
+    made, so the page says so (once) the first time one is pressed."""
     token = secrets.token_urlsafe(16)   # only this page may press the buttons
-    cfg = [{"name": n, "emoji": e, "key": k, "dur": round(len(s) / SR, 2),
-            "c": RAINBOW[i % 6][0], "d": RAINBOW[i % 6][1], "e": RAINBOW[i % 6][2], "t": RAINBOW[i % 6][3]}
-           for i, ((n, e, s), k) in enumerate(zip(sounds, KEYS))]
-    extras = [{"label": b.label, "c": b.color} for b in radio._buttons]
+    pages = pages or [(PAGES[0][0], PAGES[0][1], len(sounds), None)]
+    titles = {title.lower() for title, *_ in pages}
+    on_pages = [(k, b.page, b.label, b.color) for k, b in enumerate(radio._buttons)
+                if b.page and b.page.lower() in titles]
+    cfg = pad_config(sounds, pages, on_pages)
+    for pad in cfg:
+        if pad.get("i") in set(voiceless):
+            pad["novoice"] = True
+    paged = {k for k, *_ in on_pages}
+    page_list = [{"name": title, "emoji": emoji, "few": sum(pad["page"] == p for pad in cfg) <= 8}
+                 for p, (title, emoji, *_) in enumerate(pages)]
+    extras = [{"label": b.label, "c": b.color, "k": k} for k, b in enumerate(radio._buttons) if k not in paged]
     as_js = lambda v: json.dumps(v).replace("<", "\\u003c")   # a label can never close the <script>
     page = (PAGE.replace("__CONFIG__", as_js(cfg)).replace("__EXTRAS__", as_js(extras))
+            .replace("__PAGES__", as_js(page_list))
             .replace("__TOKEN__", token).encode("utf-8"))
     state = {"last_poll": None, "pc_poll": None, "bye_at": None}
     hosts = set()   # the only Host headers we answer, filled in once the port is known
@@ -968,7 +1308,8 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
                                             "volume": round(mixer.volume * 100),
                                             "msg": list(radio._message), "mic": mixer.mic_state(),
                                             "micLevel": round(mixer.mic_level, 4),
-                                            "delay": round(mixer.mic_delay * 1000)}).encode(), "application/json")
+                                            "delay": round(mixer.mic_delay * 1000),
+                                            "music": mixer.music is not None}).encode(), "application/json")
             elif path == "/speakers":   # token: listing re-scans the devices, so only the page may ask
                 if parse_qs(u.query).get("t", [""])[0] != token:
                     return self._send(403)
@@ -1038,7 +1379,7 @@ def open_app_window(url):
 
 
 def main():
-    p = argparse.ArgumentParser(description="James' Radio: 24 sounds on glowing toy-style pads.")
+    p = argparse.ArgumentParser(description="James' Radio: 24 sounds on glowing toy-style pads, and a STATION page.")
     p.add_argument("--out", default="", help="part of the output device's name (default: Windows default)")
     p.add_argument("--no-window", action="store_true", help="serve the page but don't open a window")
     p.add_argument("--mic-off", action="store_true",
@@ -1063,10 +1404,19 @@ def main():
         device = f"no speaker yet ({e})"
     mixer.onair(not a.mic_off)   # the mic is on the air from the start; the MIC pad mutes it
     sounds = render()
+    clips = station_voices([words for *_, words, _ in STATION if words],
+                           before=lambda n: print(f"Making the station's voice ({n} clips, the first time only)...",
+                                                  flush=True))
+    sounds += render_station(clips, sounds)
+    voiceless = [len(SOUNDS) + j for j, (*_, words, _) in enumerate(STATION) if words and clips[words] is None]
+    if voiceless:
+        print("Windows speech is not working on this PC, so the STATION pads play their sound without the voice.",
+              flush=True)
     radio = plugin_radio(mixer, sounds)
     loaded = plugins.load_all(radio)
     try:
-        server, url, state = make_server(mixer, sounds, radio, address, SHARE_PORT if a.share else 0)
+        server, url, state = make_server(mixer, sounds, radio, address, SHARE_PORT if a.share else 0,
+                                         PAGES, voiceless)
     except OSError as e:
         mixer.close()
         sys.exit(f"James' Radio: cannot listen on {address}: {e.strerror or e}")
@@ -1124,9 +1474,9 @@ body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: cen
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: #eef0f3;
   background: #15171c radial-gradient(ellipse at 50% 35%, #4b5160 0%, #1d2027 55%, #0d0e11 100%); }
-.device { position: relative; width: 96rem; padding: 3rem 3.2rem 3.2rem; border-radius: 3.2rem;
+.device { position: relative; width: 96rem; padding: 2.6rem 3.2rem 2.8rem; border-radius: 3.2rem;
   display: grid; grid-template-columns: 1fr auto auto; align-items: center;
-  grid-template-areas: "top top top" "pads pads pads" "bottom extras grille";
+  grid-template-areas: "top top top" "tabs tabs tabs" "pads pads pads" "bottom extras grille";
   background: linear-gradient(180deg, #5a606c 0%, #363a43 3%, #2a2d34 50%, #202328 97%, #121316 100%);
   box-shadow: 0 2.5rem 5rem rgba(0,0,0,.75), 0 .6rem 0 #0e0f12,
               inset 0 .15rem 0 rgba(255,255,255,.25), inset 0 -.2rem .4rem rgba(0,0,0,.6); }
@@ -1140,7 +1490,7 @@ body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: cen
 .s1 { top: 1.1rem; left: 1.1rem; --r: 30deg } .s2 { top: 1.1rem; right: 1.1rem; --r: -50deg }
 .s3 { bottom: 1.1rem; left: 1.1rem; --r: 80deg } .s4 { bottom: 1.1rem; right: 1.1rem; --r: 10deg }
 
-.top { grid-area: top; display: flex; align-items: center; gap: 2.4rem; margin-bottom: 2.4rem; min-width: 0; }
+.top { grid-area: top; display: flex; align-items: center; gap: 2.4rem; margin-bottom: 1rem; min-width: 0; }
 .brand { margin: 0; color: #eef0f3; font-weight: 900; font-size: 3rem; letter-spacing: .04em; line-height: .95;
   text-shadow: 0 .15rem 0 #000, 0 -.08rem 0 rgba(255,255,255,.2); }
 .brand b { background: linear-gradient(90deg, #ff6161, #ffad45, #ffe65e, #66e680, #66b8ff, #c896ff);
@@ -1180,10 +1530,50 @@ body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: cen
 .meter i.on:nth-child(n+11) { background: #ffd84d; box-shadow: 0 0 .8rem #ffd84d; }
 .meter i.on:nth-child(n+14) { background: #ff4d4d; box-shadow: 0 0 .8rem #ff4d4d; }
 
-.pads { grid-area: pads; display: grid; grid-template-columns: repeat(6, 1fr); gap: 1.8rem; padding: 2.2rem 1.8rem 1.8rem;
+/* Page tabs: latching keys, like a radio's band buttons; the lit one is the page you see. */
+.tabs { grid-area: tabs; justify-self: center; display: flex; gap: .8rem; margin: 0 0 1rem; padding: .4rem;
+  border-radius: 1.8rem; background: #111317;
+  box-shadow: inset 0 .3rem .8rem rgba(0,0,0,.9), 0 .12rem 0 rgba(255,255,255,.12); }
+.tabs[hidden] { display: none; }
+.tab { display: flex; align-items: center; justify-content: center; gap: 1rem; min-width: 19rem; height: max(46px, 4.3rem);
+  padding: 0 2.4rem; border: 0; border-radius: 1.3rem; cursor: pointer; color: #9aa1ab;
+  font: 900 max(12px, 1.5rem) "Segoe UI", system-ui, sans-serif; letter-spacing: .24em; text-transform: uppercase;
+  background: linear-gradient(180deg, #41454e, #2b2e35);
+  box-shadow: 0 .35rem 0 #17191d, 0 .5rem .6rem rgba(0,0,0,.5), inset 0 .1rem 0 rgba(255,255,255,.18);
+  transform: translateY(-.3rem); transition: transform .2s, box-shadow .2s, color .2s; }
+.tab[aria-selected="true"] { color: #eef0f3; transform: none;
+  box-shadow: 0 .05rem 0 #17191d, inset 0 .3rem .6rem rgba(0,0,0,.5), inset 0 .1rem 0 rgba(255,255,255,.08); }
+.tab:focus-visible { outline: .3rem solid #62ff8f; outline-offset: .3rem; }
+.tname { margin-right: -.24em; }   /* the letter spacing after the last letter would pull the word off centre */
+.led { flex: none; width: 1rem; height: 1rem; border-radius: 50%; background: #163020;
+  box-shadow: inset 0 .1rem .2rem rgba(0,0,0,.8); }
+.tab[aria-selected="true"] .led { background: #4dff7c; box-shadow: 0 0 .8rem #4dff7c; }
+/* The pages of pads sit side by side on a track that slides inside the panel; the pages you can't see are inert. */
+.pads { grid-area: pads; overflow: hidden; overflow: clip; padding: 1.9rem 1.8rem 1.6rem;
   border-radius: 2rem; background: #111317;
   box-shadow: inset 0 .5rem 1.5rem rgba(0,0,0,.9), 0 .12rem 0 rgba(255,255,255,.12); }
-.well { container-type: inline-size; aspect-ratio: 1.1; min-width: 0; border-radius: 2rem; padding: .7rem; background: #08090b;
+.pads { position: relative; }
+.track { --gap: 3.6rem; display: flex; gap: var(--gap); touch-action: pan-y pinch-zoom; container-type: inline-size;
+  transition: transform .42s cubic-bezier(.2, .9, .25, 1), height .3s ease; }
+.grid { --g: 1.8rem; flex: 0 0 100%; min-width: 0; display: grid; grid-template-columns: repeat(6, 1fr); gap: var(--g);
+  align-content: center; }
+/* A short page (eight pads or fewer): rows of at most four, centred, each pad as big as on a full page. */
+.grid.few { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start;
+  --pw: calc((100cqi - 5 * var(--g)) / 6 - .1px);
+  padding-inline: max(0px, calc((100cqi - 4 * var(--pw) - 3 * var(--g)) / 2)); }
+.grid.few > .well { flex: none; width: var(--pw); }
+/* The hand hint, on a touch screen until the page has been turned: a hand sweeping the way a swipe goes. */
+.hint { display: none; position: absolute; z-index: 3; top: 2.6rem; right: 2.4rem; align-items: center; gap: .6rem;
+  padding: .6rem 1.8rem .6rem 3.2rem; border-radius: 99rem; pointer-events: none; color: #eef0f3;
+  background: rgba(8, 9, 11, .84); box-shadow: 0 .4rem 1.2rem rgba(0,0,0,.6);
+  font: 900 max(12px, 1.4rem) "Segoe UI", system-ui, sans-serif; letter-spacing: .2em; }
+.hand { display: inline-block; font-size: max(22px, 2.8rem); line-height: 1;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  animation: sweep 1.8s ease-in-out infinite; }
+@keyframes sweep { 0%, 12% { transform: translateX(1.4rem); opacity: 0; } 30% { opacity: 1; }
+  75% { transform: translateX(-1.8rem); opacity: 1; } 100% { transform: translateX(-1.8rem); opacity: 0; } }
+@media (hover: none) { .hint:not([hidden]) { display: flex; } }
+.well { container-type: inline-size; aspect-ratio: 1.14; min-width: 0; border-radius: 2rem; padding: .7rem; background: #08090b;
   box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.95), 0 .1rem 0 rgba(255,255,255,.08); transition: box-shadow .25s; }
 .well.lit { box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.6), 0 0 2.8rem .35rem var(--glow), 0 .1rem 0 rgba(255,255,255,.08); }
 /* Pressed state: instant on pointer-down, a short spring back up on release. */
@@ -1211,7 +1601,7 @@ body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: cen
   font-size: max(12px, 9.5cqi); font-weight: 800; color: rgba(0,0,0,.62); background: rgba(255,255,255,.42);
   box-shadow: inset 0 -.12rem 0 rgba(0,0,0,.15); text-align: center; }
 
-.bottom { grid-area: bottom; display: flex; align-items: center; gap: 3rem; margin-top: 2.6rem; min-width: 0; }
+.bottom { grid-area: bottom; display: flex; align-items: center; gap: 3rem; margin-top: 2rem; min-width: 0; }
 .collar { width: 11rem; height: 11rem; border-radius: 50%; display: grid; place-items: center; flex: none;
   background: conic-gradient(from 200deg, #9aa0a8, #eceef1, #7b818a, #cdd1d6, #5d626a, #9aa0a8);
   box-shadow: 0 .4rem .8rem rgba(0,0,0,.7), inset 0 0 0 .3rem rgba(0,0,0,.25); }
@@ -1245,7 +1635,7 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   background: linear-gradient(90deg, #5f646c, #eef0f3 45%, #a7adb5 55%, #4c5057); }
 .ticks { display: flex; justify-content: space-between; padding: 0 1.4rem; color: #9aa1ab;
   font: 700 max(12px, 1.1rem) Consolas, monospace; }
-.extras { grid-area: extras; display: flex; gap: 1.6rem; margin: 2.6rem 0 0 3rem; }
+.extras { grid-area: extras; display: flex; gap: 1.6rem; margin: 2rem 0 0 3rem; }
 .extras:empty { display: none; }
 .extras .well { width: 12rem; height: 10.5rem; aspect-ratio: auto; }
 .extras .micwell { width: 15rem; }
@@ -1258,7 +1648,7 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   animation: onair 1.6s ease-in-out infinite; }
 @keyframes onair { 50% { box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.6), 0 0 1.6rem .2rem #ff3b30, 0 .1rem 0 rgba(255,255,255,.08); } }
 .pad[aria-disabled="true"] { filter: grayscale(1) brightness(.7); cursor: default; }
-.grille { grid-area: grille; width: 12rem; height: 9.5rem; margin: 2.6rem 0 0 3rem; border-radius: 1.4rem;
+.grille { grid-area: grille; width: 12rem; height: 9.5rem; margin: 2rem 0 0 3rem; border-radius: 1.4rem;
   background: radial-gradient(circle, #050506 40%, transparent 46%) 0 0 / 1.2rem 1.2rem, linear-gradient(#2c2f36, #24272d);
   box-shadow: inset 0 .3rem .6rem rgba(0,0,0,.8), 0 .1rem 0 rgba(255,255,255,.1); }
 
@@ -1336,7 +1726,12 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   .meter i { flex: 1 1 0; width: auto; max-width: .7rem; min-width: 2px; height: 2.4rem; }
   .pads, .extras { margin: 0; gap: 1rem; padding: 1.2rem; border-radius: 1.8rem; background: #111317;
     box-shadow: inset 0 .5rem 1.5rem rgba(0,0,0,.9), 0 .12rem 0 rgba(255,255,255,.12); }
-  .pads { grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); }
+  .grid { --g: 1rem; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); }
+  .grid.few { --pw: calc((100cqi - (var(--cols) - 1) * var(--g)) / var(--cols) - .1px); }
+  .hint { top: 1.8rem; right: 1.8rem; }
+  .track { --gap: 2.4rem; align-items: flex-start; }   /* each page its own height: the page below follows */
+  .tabs { justify-self: auto; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); margin: 0; }
+  .tab { min-width: 0; padding: 0 1rem; }
   .extras { display: grid; justify-content: center;   /* fixed-width tracks: a short last row sits centred */
     grid-template-columns: repeat(auto-fit, calc((100% - (var(--cols) - 1) * 1rem) / var(--cols))); }
   .extras .well { width: auto; height: auto; aspect-ratio: 1.1; }
@@ -1383,8 +1778,8 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   .key { display: block; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .pad, .pad.down, .stop, .stop.down, .emo, .well { transition: none; }
-  .sheet[open], .sheet.closing, .well.onair { animation: none; }
+  .pad, .pad.down, .stop, .stop.down, .emo, .well, .track, .tab { transition: none; }
+  .sheet[open], .sheet.closing, .well.onair, .hand { animation: none; }
   .well.lit .emo { transform: none; }
 }
 @media (prefers-reduced-transparency: reduce) {
@@ -1403,7 +1798,9 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
         <span class="spkline"><span id="spk"></span><span class="chev" aria-hidden="true">&#9662;</span></span>
         <span class="meter" id="meter" aria-hidden="true"></span></button></div>
   </header>
-  <section class="pads" id="pads" aria-label="Sounds"></section>
+  <div class="tabs" id="tabs" role="tablist" aria-label="Pages"></div>
+  <section class="pads" id="pads" aria-label="Pads"><div class="track" id="track"></div>
+    <div class="hint" id="hint" aria-hidden="true" hidden><span class="hand">&#128070;</span>SWIPE</div></section>
   <section class="extras" id="extras" aria-label="More buttons"></section>
   <footer class="bottom">
     <div class="collar"><button class="stop" id="stop" type="button"><span aria-hidden="true">&#9995;</span>STOP</button></div>
@@ -1433,11 +1830,13 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   </div>
 </dialog>
 <script>
-const SOUNDS = __CONFIG__, EXTRAS = __EXTRAS__, TOKEN = "__TOKEN__";
+const SOUNDS = __CONFIG__, PAGES = __PAGES__, EXTRAS = __EXTRAS__, TOKEN = "__TOKEN__";
 const post = (path) => fetch(`${path}?t=${TOKEN}`, { method: "POST" }).catch(() => {});
 const $ = (id) => document.getElementById(id);
+const FLOW = matchMedia("(max-width: 899.98px), (max-height: 599.98px)");
+const STILL = matchMedia("(prefers-reduced-motion: reduce)");
 const now = $("now"), dly = $("dly"), IDLE = "PRESS A BUTTON \u2605", ONAIR = "\u25CF ON AIR";
-let idle, live = false;
+let idle, live = false, swiping = null;   // swiping: the finger turning the page; the pad it started on stays quiet
 function rest() {   // what the display says between messages; the delay readout belongs to ON AIR
   now.textContent = live ? ONAIR : IDLE;
   now.classList.remove("long");
@@ -1470,7 +1869,7 @@ function pressable(el, act, immediate = false) {
   });
   el.addEventListener("pointerup", (e) => {
     el.classList.remove("down");
-    if (armed === e.pointerId) act();
+    if (armed === e.pointerId && swiping !== e.pointerId) act();
     armed = null;
   });
   el.addEventListener("pointercancel", () => { el.classList.remove("down"); armed = null; });
@@ -1498,19 +1897,130 @@ function makePad(parent, p, act) {
   return { well, b };
 }
 
-const lit = {}, byKey = {};
-SOUNDS.forEach((s, i) => {
-  Object.assign(s, makePad($("pads"), s, () => fire(i)));
-  byKey[s.key] = i;
+// Pages of pads side by side on a track. A sideways swipe, a page tab or the arrow keys turn the page, and the
+// keys play the page you see (each page has the keyboard grid to itself). The display, MIC, STOP and volume are
+// the same on every page.
+const track = $("track"), tabs = $("tabs"), lit = {}, keyed = PAGES.map(() => Object.create(null));
+let page = 0, toldNoVoice = false;
+const grids = PAGES.map((p, k) => {
+  const g = document.createElement("div"), t = document.createElement("button");
+  g.className = p.few ? "grid few" : "grid";
+  g.id = `page${k}`;
+  g.setAttribute("role", "tabpanel");
+  g.setAttribute("aria-labelledby", `tab${k}`);
+  t.type = "button";
+  t.className = "tab";
+  t.id = `tab${k}`;
+  t.setAttribute("role", "tab");
+  t.setAttribute("aria-controls", g.id);
+  t.append(span("led", ""), span("tname", p.name));
+  t.firstChild.setAttribute("aria-hidden", "true");
+  t.addEventListener("click", () => turn(k));
+  track.append(g);
+  tabs.append(t);
+  return g;
 });
-function fire(i) {
-  const s = SOUNDS[i];
-  post(`/play/${i}`);
-  s.well.classList.add("lit");
-  clearTimeout(lit[i]);
-  lit[i] = setTimeout(() => s.well.classList.remove("lit"), s.dur * 1000);
-  show(`${s.emoji} ${s.name}`);
+const tabBtns = [...tabs.children];
+tabs.hidden = PAGES.length < 2;
+// A plugin's button drawn as a pad: a label that starts with an emoji uses it as the picture.
+const PICTURE = /^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*️?)\s*/u;
+function look(x) {
+  const m = x.label.match(PICTURE);
+  return { emoji: m ? m[1] : "", name: (m && x.label.slice(m[0].length)) || x.label, t: "#fff",
+    c: x.c, d: `color-mix(in srgb, ${x.c} 76%, #000)`, e: `color-mix(in srgb, ${x.c} 45%, #000)` };
 }
+SOUNDS.forEach((s, k) => {   // the pads, page by page: sounds, and plugin buttons that asked for a page
+  if (s.button !== undefined) Object.assign(s, look(s));
+  Object.assign(s, makePad(grids[s.page], s, () => fire(k)));
+  if (s.key) keyed[s.page][s.key] = k;
+});
+let musicOn = false, musicTold = 0;
+function fire(k) {
+  const s = SOUNDS[k];
+  if (s.button !== undefined) { post(`/button/${s.button}`); return show(s.label); }   // its reply comes by the poll
+  post(`/play/${s.i}`);
+  if (s.loop) {   // the music goes round until STOP, or the next press of its pad
+    musicOn = !musicOn;
+    musicTold = performance.now();
+    s.well.classList.toggle("lit", musicOn);
+    if (!musicOn) return show("MUSIC OFF");
+  } else {
+    s.well.classList.add("lit");
+    clearTimeout(lit[k]);
+    lit[k] = setTimeout(() => s.well.classList.remove("lit"), s.dur * 1000);
+  }
+  if (s.novoice && !toldNoVoice) { toldNoVoice = true; show("NO VOICE ON THIS PC"); }   // said once; the sound plays
+  else show(`${s.emoji} ${s.name}`);
+}
+const step = () => track.offsetWidth + (parseFloat(getComputedStyle(track).columnGap) || 0);   // one page over
+const at = () => new DOMMatrixReadOnly(getComputedStyle(track).transform).m41;   // where the track is right now
+function slide(k, dx = 0) {   // page k's place, moved dx px by a finger
+  track.style.transform = `translateX(calc(${-100 * k}% - ${k} * var(--gap) + ${dx}px))`;
+}
+function fit() {   // a phone's page ends where its pads end; a big screen keeps one height, so nothing moves
+  track.style.height = FLOW.matches ? `${grids[page].offsetHeight}px` : "";
+}
+const hint = $("hint");   // the hand hint (CSS shows it on touch screens only)
+try { hint.hidden = PAGES.length < 2 || localStorage.getItem("radio-swiped") === "1"; } catch (e) { hint.hidden = PAGES.length < 2; }
+function turn(k, swiped = false) {
+  k = Math.max(0, Math.min(PAGES.length - 1, k));
+  const moved = k !== page;
+  if (moved) hint.hidden = true;   // gone once the page turns; a swipe means it has been learned for good
+  if (moved && swiped) try { localStorage.setItem("radio-swiped", "1"); } catch (e) {}
+  page = k;
+  track.style.transition = "";
+  slide(k);
+  grids.forEach((g, j) => { g.inert = j !== k; });
+  tabBtns.forEach((t, j) => { t.setAttribute("aria-selected", String(j === k)); t.tabIndex = j === k ? 0 : -1; });
+  fit();
+  if (moved) show(`${PAGES[k].emoji} ${PAGES[k].name}`);
+}
+
+// A finger moving sideways turns the page. The pads follow it (a rubber band past the first and last page), and
+// letting go settles on the next page once it is a quarter of the way there, or flicked; else back where it was.
+// The pad it started on does not play. A mouse turns pages with the tabs and the arrow keys.
+let drag = null;
+const band = (d, w) => Math.sign(d) * (1 - 1 / (Math.abs(d) * 0.55 / w + 1)) * w;
+track.addEventListener("pointerdown", (e) => {
+  if (e.pointerType !== "mouse" && !drag && PAGES.length > 1)
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, on: false, v: 0, px: e.clientX, t: e.timeStamp };
+}, true);
+track.addEventListener("pointermove", (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  if (!drag.on) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) < 10 || Math.abs(dx) < 1.2 * Math.abs(dy)) return;   // not a sideways swipe (yet)
+    drag.on = true;
+    swiping = drag.id;
+    release();   // the pad under the finger comes back up, and its press is off
+    drag.x = e.clientX;
+    drag.base = at() + page * step();   // caught while settling: carry on from where it is
+    track.style.transition = "none";
+  }
+  const w = step(), last = -(PAGES.length - 1) * w;
+  let x = -page * w + drag.base + e.clientX - drag.x;
+  x = x > 0 ? band(x, w) : x < last ? last + band(x - last, w) : x;
+  slide(page, x + page * w);
+  const dt = e.timeStamp - drag.t;
+  if (dt > 0) drag.v = 0.7 * ((e.clientX - drag.px) / dt) + 0.3 * drag.v;   // px per ms
+  drag.px = e.clientX;
+  drag.t = e.timeStamp;
+});
+function letGo(e) {   // after the pad's own pointerup, which saw `swiping` and kept quiet
+  if (!drag || e.pointerId !== drag.id) return;
+  const d = drag;
+  drag = swiping = null;
+  if (!d.on) return;
+  if (e.type === "pointercancel") return turn(page);
+  const w = step(), moved = at() + page * w, v = e.timeStamp - d.t > 100 ? 0 : d.v;   // held still before letting go
+  turn(moved < -w / 4 || (v < -0.3 && moved < 0) ? page + 1 : moved > w / 4 || (v > 0.3 && moved > 0) ? page - 1 : page, true);
+}
+track.addEventListener("pointerup", letGo);
+track.addEventListener("pointercancel", letGo);
+turn(0);
+const resized = new ResizeObserver(() => fit());
+grids.forEach((g) => resized.observe(g));
+FLOW.addEventListener("change", fit);
 
 // The MIC pad: the PC's microphone is on the air while the radio runs, out of the radio's own speaker, the
 // sheet's delay later. A tap, click, Enter or M mutes it, and the same again puts it back on the air. Any page
@@ -1543,19 +2053,14 @@ function setMic(on) {
 }
 paintMic();
 
-// Plugin buttons (plugins/*.py) are pads too. A label that starts with an emoji uses it as the picture.
-const PICTURE = /^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*️?)\s*/u;
-EXTRAS.forEach((x, i) => {
-  const m = x.label.match(PICTURE);
-  makePad($("extras"), {
-    emoji: m ? m[1] : "", name: (m && x.label.slice(m[0].length)) || x.label, t: "#fff",
-    c: x.c, d: `color-mix(in srgb, ${x.c} 76%, #000)`, e: `color-mix(in srgb, ${x.c} 45%, #000)`,
-  }, () => { post(`/button/${i}`); show(x.label); });
-});
+// Plugin buttons (plugins/*.py) that name no page sit in the row under the pads, beside the MIC.
+EXTRAS.forEach((x) => makePad($("extras"), look(x), () => { post(`/button/${x.k}`); show(x.label); }));
 
 function stopAll() {
   post("/stop");
   SOUNDS.forEach((s, i) => { clearTimeout(lit[i]); s.well.classList.remove("lit"); });
+  musicOn = false;
+  musicTold = performance.now();
   show("✋ STOP");
 }
 const stop = $("stop");
@@ -1567,8 +2072,6 @@ addEventListener("contextmenu", (e) => e.preventDefault());   // no long-press m
 
 // The speaker sheet: tap the speaker name under the display to choose where the sound plays.
 const sheet = $("sheet"), spklist = $("spklist"), spkbtn = $("spkbtn");
-const FLOW = matchMedia("(max-width: 899.98px), (max-height: 599.98px)");
-const STILL = matchMedia("(prefers-reduced-motion: reduce)");
 function note(text, warn = false) {
   const p = document.createElement("p");
   p.className = warn ? "note warn" : "note";
@@ -1656,12 +2159,19 @@ addEventListener("keydown", (e) => {
   const k = e.key.toLowerCase();
   if (k === " " || k === "escape") { e.preventDefault(); stop.classList.add("down"); stopAll(); return; }
   if (k === "m" && e.target !== vol) { mic.b.classList.add("down"); setMic(!live); return; }   // mute / on the air
-  if (k in byKey && e.target !== vol) { SOUNDS[byKey[k]].b.classList.add("down"); fire(byKey[k]); }
+  if ((k === "arrowleft" || k === "arrowright") && e.target !== vol) {   // the volume fader keeps its own arrows
+    e.preventDefault();
+    turn(page + (k === "arrowright" ? 1 : -1));
+    if (tabBtns.includes(document.activeElement)) tabBtns[page].focus();
+    return;
+  }
+  const i = keyed[page][k];
+  if (i !== undefined && e.target !== vol) { SOUNDS[i].b.classList.add("down"); fire(i); }
 });
 addEventListener("keyup", (e) => {
   if (sheet.open) return;
   const k = e.key.toLowerCase();
-  if (k in byKey) SOUNDS[byKey[k]].b.classList.remove("down");
+  keyed.forEach((keys) => { if (keys[k] !== undefined) SOUNDS[keys[k]].b.classList.remove("down"); });
   if (k === " " || k === "escape") stop.classList.remove("down");
   if (k === "m") mic.b.classList.remove("down");
 });
@@ -1678,7 +2188,7 @@ const segs = Array.from({ length: 16 }, () => meter.appendChild(document.createE
 let shown = 0, synced = false, seen = -1, speakerShown = "";
 async function poll() {
   try {
-    const { level, speaker, volume, msg, mic: m, micLevel, delay } = await (await fetch("/level")).json();
+    const { level, speaker, volume, msg, mic: m, micLevel, delay, music } = await (await fetch("/level")).json();
     if (!synced) { vol.value = volume; volout.textContent = `${volume}%`; synced = true; }   // a reload keeps the app's volume
     if (seen >= 0 && msg[0] !== seen) show(msg[1]);   // a plugin button's reply, e.g. "No microphone"
     seen = msg[0];
@@ -1688,6 +2198,10 @@ async function poll() {
       spkbtn.setAttribute("aria-label", `Speaker: ${speaker}. Choose the speaker and mic`);
     }
     if (delay !== delayMs) { delayMs = delay; paintMic(); }
+    if (music !== musicOn && performance.now() - musicTold > 600) {   // stopped (or started) from another page
+      musicOn = music;
+      SOUNDS.forEach((s) => { if (s.loop) s.well.classList.toggle("lit", musicOn); });
+    }
     if (m !== micState && performance.now() - micTold > 600) {   // a fresh press wins over a poll already on its way
       if (m === "hush" && micState === "live") show("TOO LOUD, MOVE THE MIC");
       micState = m;

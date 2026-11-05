@@ -1,10 +1,11 @@
 # James' Radio
 
-James' Radio is a toy soundboard for Windows: 24 synthesized sounds on big glowing pads. Every sound is
-generated with numpy when the program starts, so there are no sound files. The only downloads are the ones uv
-makes on the first run (Python and two libraries, see Requirements).
+James' Radio is a toy soundboard for Windows: 24 synthesized sounds on big glowing pads, and a second page,
+STATION, of radio-show pads (below). Every sound is generated with numpy when the program starts, so there are no
+sound files; the station's voice is made once with Windows' own speech. The only downloads are the ones uv makes on
+the first run (Python and two libraries, see Requirements).
 
-Tap a pad or press its key. The keys follow the grid's shape on the keyboard:
+Tap a pad or press its key. The keys follow the grid's shape on the keyboard and play the page you see:
 
 | Row | Keys | Sounds |
 |---|---|---|
@@ -13,7 +14,8 @@ Tap a pad or press its key. The keys follow the grid's shape on the keyboard:
 | 3 | `A S D F G H` | Fart, Boing, Slide whistle, Bubbles, Crickets, Ghost |
 | 4 | `Z X C V B N` | Laser, Explosion, Robot, Power up, Magic, Record scratch |
 
-**M** mutes the microphone and puts it back on the air (below). **Space** (or Esc) stops all sounds. The page also has a STOP button, a volume fader (0-150%) and a level meter.
+**→** and **←** turn the page (so do a sideways swipe and the SOUNDS and STATION tabs). **M** mutes the
+microphone and puts it back on the air (below). **Space** (or Esc) stops all sounds. The page also has a STOP button, a volume fader (0-150%) and a level meter.
 
 Python plays the sound through one audio stream. The radio itself is a small web page served on 127.0.0.1
 only (unless you share it with a phone, below), opened in a Microsoft Edge app window (or your default browser
@@ -26,6 +28,8 @@ or tablet in either orientation.
 - Python 3.10 or newer, run through [uv](https://docs.astral.sh/uv/getting-started/installation/). uv installs
   Python and the two libraries (numpy, sounddevice) by itself on the first run.
 - A sound output: speakers or headphones
+- For the STATION page's voice: Windows' built-in speech, which comes with Windows. Without it those pads play
+  without the voice.
 
 ## Run
 
@@ -65,7 +69,7 @@ console window prints an address like `http://192.168.0.42:8481/`. Open that add
 or tablet on the same Wi-Fi. On an iPhone or iPad, Share > Add to Home Screen gives it an icon; the address stays
 the same as long as the PC keeps its network address.
 
-- The phone is a remote control. The sound comes out of the PC, and Call in records with the PC's microphone.
+- The phone is a remote control. The sound comes out of the PC, and Phone call records with the PC's microphone.
 - It only works while James' Radio is open on the PC. Close the radio's window on the PC and it stops for
   every phone.
 - Nothing leaves the home network. The radio listens on the PC's home-network address only, has no accounts and
@@ -80,13 +84,35 @@ the same as long as the PC keeps its network address.
 Extra buttons come from small Python files in `plugins/`; every one there is loaded at start. The radio ships
 with one:
 
-- **Call in** (`plugins/call_in.py`): a phone rings, a beep says "talk now", the microphone records five
-  seconds, and the radio plays a short station sting and then puts the caller on the air. With no microphone
-  the screen says so and nothing else happens.
+- **Phone call** (`plugins/call_in.py`, on the STATION page): a phone rings, a beep says "talk now", the
+  microphone records five seconds, and the radio plays a short station sting and then puts the caller on the air.
+  With no microphone the screen says so and nothing else happens.
 
 To write your own, see [docs/plugins.md](docs/plugins.md). Plugins never touch the network. Tests:
 `uv run --with numpy --with sounddevice python -m unittest discover -s tests` (no audio device is used;
 plain `py -3 -m unittest discover -s tests` also works and skips the mic tests, which need numpy).
+
+## The STATION page
+
+Swipe the pads sideways for the radio-show page, or tap the STATION tab, or press **→**. Swipe back, tap SOUNDS or
+press **←** to return. On a phone or tablet a little hand shows the swipe until you have done it once. The display
+shows the page's name, and the MIC, STOP and volume work the same on both pages.
+
+| Key | Pad | What it plays |
+|---|---|---|
+| `1` | Station ID | a three-note logo, then "You're listening to James' Radio!" |
+| `2` | Sponsors | "And now, our sponsors!", then a cheesy jingle that ends with a cash register |
+| `3` | Music | "Here's some music!", then 12 seconds of upbeat music that goes round until you press STOP (or the pad again) |
+| `4` | Weather | "Here's the weather" over rain and wind, then thunder |
+| `Q` | Breaking news | a whoosh and a big hit, then "Breaking news!" over alert beeps |
+| `W` | Phone call | the phone rings, the caller talks for five seconds, then goes on the air (Plugins, below) |
+| `E` | Applause | the first page's applause, for the caller |
+| `R` | Sign off | "That's all for today, goodnight!", then a soft chime |
+
+The voice is Windows' own speech voice. The radio makes its six lines the first time it starts (a second or two)
+and keeps them in a `cache/` folder next to `radio.py`; delete the folder to make them again. Making them only
+writes files, nothing is played. If Windows speech does not work on the PC, those pads play without the voice, and
+the display says "No voice on this PC" the first time.
 
 ## The MIC pad
 

@@ -1,4 +1,4 @@
-"""Call in: the phone rings, you talk for five seconds, and the radio puts you on the air."""
+"""Phone call: the phone rings, you talk for five seconds, and the radio puts you on the air."""
 import time
 
 TALK_SECONDS = 5
@@ -25,4 +25,4 @@ def register(radio):
         time.sleep(TALK_SECONDS)               # one call at a time: the button is busy until playback ends
         return "You were on the air!"
 
-    radio.add_button("📞 Call in", "#ff4f8b", call_in)
+    radio.add_button("📞 Phone call", "#ff4f8b", call_in, page="Station")

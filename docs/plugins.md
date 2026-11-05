@@ -1,8 +1,8 @@
 # Writing a plugin for James' Radio
 
 A plugin is one Python file in `plugins/`. When the radio starts, it loads every `plugins/*.py` (files starting
-with `_` are skipped) and calls the file's `register(radio)`. Whatever buttons it adds appear on the radio after
-the 24 pads. `plugins/call_in.py` is a complete example.
+with `_` are skipped) and calls the file's `register(radio)`. The buttons it adds appear in the row under the pads,
+or on the page of pads they name. `plugins/call_in.py` (Phone call, on the STATION page) is a complete example.
 
 ## A plugin in ten lines
 
@@ -28,12 +28,12 @@ Save it as `plugins/doorbell.py` and start the radio. The console line lists the
 
 | Method | What it does |
 |---|---|
-| `add_button(label, color, on_press)` | Adds a button. `label` is text (start it with an emoji to give the button a picture); `color` is a hex color like `"#ff6161"`; `on_press()` runs on its own thread each time the button is pressed. If `on_press` returns a string, the radio's screen shows it. A press while the last one is still running is ignored. |
-| `play(sound)` | Starts a sound and returns at once; sounds overlap. `sound` is a pad's name (`"Ding!"`, `"Boing"`, ...) or samples that `record()` returned. A name that does not exist raises `KeyError`. |
+| `add_button(label, color, on_press, page=None)` | Adds a button. `label` is text (start it with an emoji to give the button a picture); `color` is a hex color like `"#ff6161"`; `on_press()` runs on its own thread each time the button is pressed. If `on_press` returns a string, the radio's screen shows it. A press while the last one is still running is ignored. `page="Station"` puts the button on the STATION page among its pads; without `page` it goes in the row under the pads. |
+| `play(sound)` | Starts a sound and returns at once; sounds overlap. `sound` is a pad's name (`"Ding!"`, `"Boing"`, `"Station ID"`, ...) or samples that `record()` returned. A name that does not exist raises `KeyError`. |
 | `tone(freq, seconds)` | Starts a soft sine wave and returns at once. The frequency is kept between 40 and 4000 Hz and the length at 5 seconds or less. |
 | `record(seconds)` | Records from the Windows default microphone and returns the samples (48 kHz, mono), or `None` when there is no microphone. Blocks while it records; at most 30 seconds. `record(0)` only checks that a microphone is there. |
 
-There is no `say()`: the radio has no speech voice.
+There is no `say()`: the station voice says only the STATION page's own lines.
 
 ## Rules
 

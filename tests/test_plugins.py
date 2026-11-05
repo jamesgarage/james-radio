@@ -1,4 +1,4 @@
-"""Plugin system tests: discovery, skip-on-error, the API surface, and the shipped Call in plugin.
+"""Plugin system tests: discovery, skip-on-error, the API surface, and the shipped Phone call plugin.
 
 Standard library only:  py -3 -m unittest discover -s tests
 """
@@ -115,11 +115,11 @@ class SkipOnError(unittest.TestCase):
 class ApiSurface(unittest.TestCase):
     def test_the_public_api_is_exactly_four_methods(self):
         public = {n for n, v in vars(plugins.Radio).items() if callable(v) and not n.startswith("_")}
-        self.assertEqual(public, {"add_button", "play", "tone", "record"})   # no say(): the app has no speech
+        self.assertEqual(public, {"add_button", "play", "tone", "record"})   # no say(): only the station speaks
 
     def test_signatures(self):
         sig = lambda name: list(inspect.signature(getattr(plugins.Radio, name)).parameters)[1:]
-        self.assertEqual(sig("add_button"), ["label", "color", "on_press"])
+        self.assertEqual(sig("add_button"), ["label", "color", "on_press", "page"])
         self.assertEqual(sig("play"), ["sound"])
         self.assertEqual(sig("tone"), ["freq", "seconds"])
         self.assertEqual(sig("record"), ["seconds"])
@@ -171,12 +171,16 @@ class ApiSurface(unittest.TestCase):
         self.assertEqual(radio._message, (1, "Hello"))
 
 
-class CallIn(unittest.TestCase):
+class PhoneCall(unittest.TestCase):
     def load(self, mic):
         radio, calls, lines = make_radio(mic)
         plugins.load_all(radio, log=lines.append)
-        [button] = [b for b in radio._buttons if "Call in" in b.label]
+        [button] = [b for b in radio._buttons if "Phone call" in b.label]
         return button, calls
+
+    def test_it_is_on_the_station_page(self):
+        button, _ = self.load(mic=True)
+        self.assertEqual(button.page, "Station")
 
     def test_no_microphone_says_so_and_does_nothing_else(self):
         button, calls = self.load(mic=False)

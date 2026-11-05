@@ -22,8 +22,9 @@ def _print(text):
 
 
 class _Button:
-    def __init__(self, label, color, on_press):
-        self.label, self.color, self.on_press, self.busy = label, color, on_press, threading.Lock()
+    def __init__(self, label, color, on_press, page=None):
+        self.label, self.color, self.on_press, self.page = label, color, on_press, page
+        self.busy = threading.Lock()
 
 
 class Radio:
@@ -32,19 +33,22 @@ class Radio:
     def __init__(self, sound_names, play, tone, record, log=_print):
         self._sound_names = list(sound_names)
         self._play, self._tone, self._record, self._log = play, tone, record, log
-        self._buttons = []        # drawn on the page after the 24 pads, in load order
+        self._buttons = []        # drawn in load order: on the page they name, else in the row under the pads
         self._message = (0, "")   # (count, text): the latest on_press reply, shown on the screen
         self._lock = threading.Lock()
 
-    def add_button(self, label, color, on_press):
-        """A button on the radio. on_press() runs on its own thread; a string it returns is shown on the screen."""
+    def add_button(self, label, color, on_press, page=None):
+        """A button on the radio. on_press() runs on its own thread; a string it returns is shown on the screen.
+        page names a page of pads to put it on ("Station"); without one it sits in the row under the pads."""
         if not isinstance(label, str) or not label.strip():
             raise ValueError("label must be some text")
         if not (isinstance(color, str) and COLOR.fullmatch(color)):
             raise ValueError(f"color must look like '#ff6161', not {color!r}")
         if not callable(on_press):
             raise TypeError("on_press must be a function")
-        self._buttons.append(_Button(label.strip(), color, on_press))
+        if page is not None and not (isinstance(page, str) and page.strip()):
+            raise ValueError("page must be a page's name, like 'Station'")
+        self._buttons.append(_Button(label.strip(), color, on_press, page and page.strip()))
 
     def play(self, sound):
         """Start a built-in sound by name ("Ding!") or samples from record(); returns at once, sounds overlap."""
