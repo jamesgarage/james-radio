@@ -39,8 +39,10 @@ give `Play.cmd` are passed on.
 Options:
 
 - `--out "<part of name>"` plays through the output device whose name contains that text, for example
-  `uv run radio.py --out "Speakers (USB"`. Without it, the radio uses the Windows default output. If the named
-  device is missing, the radio plays on the default output and checks every 5 seconds for the named one to return.
+  `uv run radio.py --out "Speakers (USB"`. Without it, the radio plays on the Windows default output and follows
+  it: pick another default speaker in Windows while the radio runs, and the sound moves there within 5 seconds,
+  between sounds. If the named device is missing, the radio plays on the default output and checks every 5
+  seconds for the named one to return.
 - `--no-window` serves the page but does not open a window. The program prints the address; open it within
   90 seconds (5 minutes with `--share`), or the program exits.
 - `--share` also lets phones and tablets on the same Wi-Fi play the radio; see below.

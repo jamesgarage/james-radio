@@ -4,7 +4,7 @@
 # ///
 """James' Radio: 24 synthesized sounds on glowing toy-style pads, in an app window.
 
-    uv run radio.py                               # Windows default output
+    uv run radio.py                               # Windows' default output, followed when it changes
     uv run radio.py --out "Speakers (USB"
     uv run radio.py --share                       # phones and tablets on the same Wi-Fi can play it too
 
@@ -367,29 +367,87 @@ def plugin_radio(mixer, sounds):
     return plugins.Radio(by_name, play, tone, mixer.record)
 
 
-class Mixer:
-    """One output stream; overlapping sounds are summed in the callback."""
+def _com(obj, slot, *argtypes):
+    """Method number `slot` (vtable order) of the COM object `obj`, called with the remaining arguments."""
+    import ctypes
+    vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtable[slot])
+    return lambda *args: fn(obj, *args)
 
-    def __init__(self, out_part):
-        self.out_part, self.voices, self.lock, self.volume, self.stream = out_part, [], threading.Lock(), 1.0, None
+
+def windows_default_speaker():
+    """An id for Windows' default speaker that changes when someone picks another one; None if Windows won't say.
+    Asked of Windows' audio service (Core Audio) directly: PortAudio only learns of a new default by re-scanning,
+    and a re-scan closes the stream that is playing."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    ole32 = ctypes.windll.ole32
+    started = ole32.CoInitializeEx(None, 0)   # S_OK / S_FALSE: ours to undo; RPC_E_CHANGED_MODE: COM is already up
+    try:
+        clsid, iid = (ctypes.c_byte * 16)(), (ctypes.c_byte * 16)()
+        ole32.CLSIDFromString("{BCDE0395-E52F-467C-8E3D-C4579291692E}", clsid)   # MMDeviceEnumerator
+        ole32.CLSIDFromString("{A95664D2-9614-4F35-A746-DE8DB63617E6}", iid)     # IMMDeviceEnumerator
+        enum, dev, text = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+        if ole32.CoCreateInstance(clsid, None, 1, iid, ctypes.byref(enum)) < 0 or not enum:
+            return None
+        try:   # GetDefaultAudioEndpoint(eRender, eMultimedia): the role PortAudio's WASAPI default uses
+            if _com(enum, 4, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(0, 1, ctypes.byref(dev)) < 0:
+                return None
+            try:
+                if _com(dev, 5, ctypes.POINTER(ctypes.c_void_p))(ctypes.byref(text)) < 0:   # IMMDevice::GetId
+                    return None
+                try:
+                    return ctypes.wstring_at(text.value)
+                finally:
+                    ole32.CoTaskMemFree(text)
+            finally:
+                _com(dev, 2)()     # Release
+        finally:
+            _com(enum, 2)()
+    except OSError:
+        return None
+    finally:
+        if started >= 0:
+            ole32.CoUninitialize()
+
+
+class Mixer:
+    """One output stream; overlapping sounds are summed in the callback.
+
+    Which speaker: the one named with --out, else Windows' default, followed when it changes (between sounds).
+    A named speaker that is away is waited for on Windows' default."""
+
+    def __init__(self, out_part, default_id=windows_default_speaker):
+        self.voices, self.lock, self.volume, self.stream = [], threading.Lock(), 1.0, None
         self.level, self.open_lock, self.device, self.fallback = 0.0, threading.Lock(), "", False
         self.closed = False
+        self.pin, self.pin_exact = out_part or None, False   # stay on this speaker (part of its name); None: follow
+        self.default_id, self.seen_default = default_id, None   # Windows' default speaker when the stream opened
+        self.outputs = []   # (index, name) of every WASAPI output at the last scan
+
+    def _pinned(self, name):
+        if not self.pin:
+            return False
+        return name == self.pin if self.pin_exact else self.pin.lower() in name.lower()
 
     def _open(self):
-        """(Re)open on the asked-for speaker, or on Windows' default output while that one is away."""
+        """(Re)open on the speaker we should be on (see the class note). Re-scans the devices first."""
         if self.stream is not None:
             self.stream.close()
             self.stream = None
         self.device = "No speaker"   # what the page shows until a stream opens
+        self.seen_default = self.default_id()   # before the scan: a change after this is caught on the next look
         sd._terminate()              # re-scan devices: PortAudio only knows the list from when it started
         sd._initialize()
         api = next(i for i, a in enumerate(sd.query_hostapis()) if a["name"] == "Windows WASAPI")
-        wanted = [i for i, d in enumerate(sd.query_devices()) if self.out_part and d["hostapi"] == api
-                  and d["max_output_channels"] > 0 and self.out_part.lower() in d["name"].lower()]
+        self.outputs = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
+                        if d["hostapi"] == api and d["max_output_channels"] > 0]
+        wanted = [i for i, name in self.outputs if self._pinned(name)]
         dev = wanted[0] if wanted else sd.query_hostapis(api)["default_output_device"]
         if dev < 0:
             raise LookupError("Windows has no output device")
-        self.fallback = bool(self.out_part) and not wanted
+        self.fallback = bool(self.pin) and not wanted
         ch = min(2, sd.query_devices(dev)["max_output_channels"])
         self.stream = sd.OutputStream(device=dev, samplerate=SR, channels=ch, dtype="float32", latency="low",
                                       callback=self._mix, extra_settings=sd.WasapiSettings(auto_convert=True))
@@ -398,18 +456,32 @@ class Mixer:
         return self.device
 
     def watch(self):
-        """Every 5 s: reopen a dead stream, and while on the fallback speaker, look for the real one again."""
+        """Every 5 s: reopen a dead stream. Between sounds, also move to Windows' new default speaker, or back to
+        a named speaker that has returned."""
         while True:
             time.sleep(5)
-            with self.open_lock:
-                if self.closed:
-                    return
-                dead = self.stream is None or not self.stream.active
-                if dead or (self.fallback and not self.voices):   # only switch back between sounds
-                    try:
-                        self._open()
-                    except Exception:
-                        pass
+            if not self._tick():
+                return
+
+    def _tick(self):
+        """One look; False once the mixer is closed."""
+        with self.open_lock:
+            if self.closed:
+                return False
+            dead = self.stream is None or not self.stream.active
+            if dead or (not self.voices and (self.fallback or self._default_moved())):   # never cut a sound short
+                try:
+                    self._open()
+                except Exception:
+                    pass
+            return True
+
+    def _default_moved(self):
+        """Windows' default speaker is not the one it was when the stream opened (only matters while following)."""
+        if self.pin:
+            return False
+        now = self.default_id()
+        return now is not None and now != self.seen_default
 
     def _mix(self, outdata, frames, when, status):
         mix = np.zeros(frames, dtype=np.float32)
