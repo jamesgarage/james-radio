@@ -638,6 +638,17 @@ def share_address(asked):
     return asked
 
 
+class Server(ThreadingHTTPServer):
+    """The page server, alone on its port. Python's default SO_REUSEADDR lets a second server on Windows bind a
+    port that is taken, so two Wi-Fi launches would share 8481 and a phone would reach either radio."""
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):   # Windows: nobody else may bind it while we have it either
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
     token = secrets.token_urlsafe(16)   # only this page may press the buttons
     cfg = [{"name": n, "emoji": e, "key": k, "dur": round(len(s) / SR, 2),
@@ -722,11 +733,11 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
             self._send(204)
 
     try:
-        server = ThreadingHTTPServer((address, port), Handler)
+        server = Server((address, port), Handler)
     except OSError:
         if not port:
             raise
-        server = ThreadingHTTPServer((address, 0), Handler)   # the usual port is taken: any free one
+        server = Server((address, 0), Handler)   # the usual port is taken: any free one
     port = server.server_address[1]
     hosts.update({f"127.0.0.1:{port}", f"localhost:{port}", f"{address}:{port}"})
     return server, f"http://{address}:{port}/", state
