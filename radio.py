@@ -1157,6 +1157,7 @@ body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: cen
 #now { min-width: 0; font: 700 2.9rem Consolas, "Courier New", monospace; color: #62ff8f; letter-spacing: .12em;
   text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   text-shadow: 0 0 .9rem rgba(98,255,143,.85); }
+#now.long { font-size: 2.1rem; letter-spacing: .06em; }   /* a long message still fits in one line */
 /* The speaker line and meter are one button, the display's full height: a tap opens the speaker sheet. */
 .right { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: .5rem;
   flex: 0 1 auto; min-width: 0; max-width: 100%; align-self: stretch; margin: 0 -1.2rem 0 0; padding: 0 1.2rem;
@@ -1248,6 +1249,10 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
 .extras:empty { display: none; }
 .extras .well { width: 12rem; height: 10.5rem; aspect-ratio: auto; }
 .extras .micwell { width: 15rem; }
+/* Sized by the pad's height, not its width: on a phone it is two pads wide and one pad tall. */
+.micwell { container-type: size; }
+.micwell .emo { font-size: 40cqmin; }
+.micwell .lbl { font-size: max(12px, 12cqmin); }
 /* The MIC pad: a red ON AIR light while the mic is on the air, grey when muted. */
 .well.onair { box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.6), 0 0 3rem .6rem #ff3b30, 0 .1rem 0 rgba(255,255,255,.08);
   animation: onair 1.6s ease-in-out infinite; }
@@ -1318,6 +1323,7 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   .lcd { flex: 1 1 26rem; height: auto; min-height: 6.2rem; flex-wrap: wrap; gap: .3rem 1.4rem;
     padding: .8rem 1.4rem; border-width: .4rem; }
   #now { flex: 1 1 auto; font-size: 2.2rem; }
+  #now.long { font-size: 1.75rem; }
   /* The speaker line gets its own row in the display: the name first, the meter shrinks into what is left. */
   .right { flex: 1 1 100%; flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem;
     min-height: 44px; margin: -.4rem -.8rem; padding: .4rem .8rem; }
@@ -1335,6 +1341,9 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
     grid-template-columns: repeat(auto-fit, calc((100% - (var(--cols) - 1) * 1rem) / var(--cols))); }
   .extras .well { width: auto; height: auto; aspect-ratio: 1.1; }
   .extras .micwell { grid-column: span 2; aspect-ratio: 2.25; }
+  .extras .micwell .pad { flex-direction: row; gap: 6cqmin; }
+  .micwell .emo { font-size: 58cqmin; }
+  .micwell .lbl { font-size: max(12px, 20cqmin); }
   .well { border-radius: 1.6rem; padding: .5rem; }
   .pad { border-radius: 1.3rem; transform: translateY(-.7rem);
     box-shadow: 0 .7rem 0 var(--e), 0 1rem .9rem rgba(0,0,0,.55),
@@ -1427,11 +1436,17 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
 const SOUNDS = __CONFIG__, EXTRAS = __EXTRAS__, TOKEN = "__TOKEN__";
 const post = (path) => fetch(`${path}?t=${TOKEN}`, { method: "POST" }).catch(() => {});
 const $ = (id) => document.getElementById(id);
-const now = $("now"), IDLE = "PRESS A BUTTON \u2605", ONAIR = "\u25CF ON AIR";
+const now = $("now"), dly = $("dly"), IDLE = "PRESS A BUTTON \u2605", ONAIR = "\u25CF ON AIR";
 let idle, live = false;
-const rest = () => (now.textContent = live ? ONAIR : IDLE);
+function rest() {   // what the display says between messages; the delay readout belongs to ON AIR
+  now.textContent = live ? ONAIR : IDLE;
+  now.classList.remove("long");
+  dly.hidden = !live;
+}
 function show(text) {
   now.textContent = text;
+  now.classList.toggle("long", [...text].length > 16);
+  dly.hidden = true;
   clearTimeout(idle);
   idle = setTimeout(rest, 2500);
 }
@@ -1505,7 +1520,7 @@ const MIKE = "\u{1F399}\uFE0F", HUSHED = "\u{1F507}";
 const mic = makePad($("extras"), { key: "m", emoji: MIKE, name: "ON AIR", ...AIR }, () => setMic(!live));
 mic.well.classList.add("micwell");
 mic.b.classList.add("mic");
-const lcd = document.querySelector(".lcd"), dly = $("dly");
+const lcd = document.querySelector(".lcd");
 let micState = "live", micTold = 0, delayMs = 350;
 function paintMic() {
   const on = micState === "live" || micState === "hush", none = micState === "none";
@@ -1516,7 +1531,6 @@ function paintMic() {
   mic.b.setAttribute("aria-label", none ? "No microphone" : on ? "Microphone on the air. Mute" : "Microphone muted. Put it on the air");
   mic.b.setAttribute("aria-disabled", String(none));
   lcd.classList.toggle("onair", on);
-  dly.hidden = !on;
   dly.textContent = delayMs ? `DELAY ${delayMs} MS` : "NO DELAY";
   if (on !== live) { live = on; clearTimeout(idle); rest(); }
 }
