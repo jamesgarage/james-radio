@@ -9,7 +9,7 @@
     uv run radio.py --share                       # phones and tablets on the same Wi-Fi can play it too
 
 Keys 123456 / QWERTY / ASDFGH / ZXCVBN play the pads (the grid's shape on the keyboard); Space stops all;
-M turns the MIC pad (the PC's microphone, through the radio's speaker) on and off.
+the PC's microphone is on the air (through the radio's speaker) while the radio runs, and M or the MIC pad mutes it.
 The page is served on 127.0.0.1 only, unless --share asks for the home network too; closing the window ends
 the program.
 """
@@ -436,8 +436,8 @@ def windows_default(flow):
 
 
 MIC_GAIN = 0.3        # the live mic's loudness to start with; the sheet's slider goes 0 to 1
-MIC_DELAY = 0.35      # seconds the mic is held back, so you hear yourself a moment later; 0 = live
-MAX_DELAY = 1.0
+MIC_DELAY = 0.35      # seconds from the mic to the speaker, so you hear yourself a moment later; 0 = straight through
+MAX_DELAY = 2.0
 CEILING = 0.95        # limit() never passes 1.0; from 0.95 on it is flat out
 MIC_FULL = 0.98       # the mic itself at full scale
 MIC_LOUD = 0.5        # loud enough at the mic to be what pins the speaker
@@ -531,9 +531,10 @@ class Mixer:
     when it changes. Changes wait for the sounds playing to end. A picked or named speaker that is away is waited
     for on Windows' default.
 
-    The MIC pad's microphone has its own input stream, open only while the mic is live. Its callback feeds a ring
-    that the output callback mixes from, so the voice always comes out of the same speaker as the pads. The mic
-    is the one picked on the page, else Windows' default."""
+    The microphone is on the air from the start (main() asks for it) until the MIC pad mutes it; one plugged in
+    later goes on the air by itself. It has its own input stream, open only while it is on the air. Its callback
+    feeds a ring that the output callback mixes from, so the voice always comes out of the same speaker as the
+    pads. The mic is the one picked on the page, else Windows' default."""
 
     def __init__(self, out_part, default_id=windows_default_speaker, mic_default_id=windows_default_mic):
         self.voices, self.lock, self.volume, self.stream = [], threading.Lock(), 1.0, None
@@ -547,6 +548,7 @@ class Mixer:
         self.scanned_at = 0.0
         # the live mic: mic_lock guards its stream (lock order: open_lock, then mic_lock)
         self.mic_lock, self.mic_stream, self.mic_live, self.ring = threading.Lock(), None, False, None
+        self.want_air = False   # on the air unless muted: a mic that comes (back) is put on by watch()
         self.mic_pin = None   # the picked mic's exact name; None: Windows' default
         self.mic_default_id, self.seen_mic_default = mic_default_id, None
         self.inputs, self.mics_listed, self.default_in, self.default_mic = [], [], -1, ""
@@ -622,19 +624,20 @@ class Mixer:
             if self.closed:
                 return False
             dead = self.stream is None or not self.stream.active
-            busy = self.voices or self.mic_live   # never cut a sound short, or someone on the mic
-            if dead or (not busy and (self.fallback or self.switch or self._default_moved())):
+            if dead or (not self.voices and (self.fallback or self.switch or self._default_moved())):   # never cut a sound short
                 try:
-                    self._open()
+                    self._open()   # a live mic comes along (closed for the re-scan, opened again after)
                 except Exception:
                     pass
-            return True
+        if self.want_air and not self.mic_live and self.inputs:
+            self.onair(True)   # not muted, and there is a mic now (plugged in, or it would not open before)
+        return True
 
     def speakers(self):
         """The page's speaker list. Re-scanned when nothing is playing, so a speaker switched on a moment ago is in
         it (a re-scan reopens the stream, which is why it waits for silence)."""
         with self.open_lock:
-            if not self.voices and not self.mic_live and not self.closed:
+            if not self.voices and not self.closed:
                 try:
                     self._open()
                 except Exception:
@@ -648,7 +651,7 @@ class Mixer:
         unless that has just been done (the sheet asks for both)."""
         with self.open_lock:
             fresh = time.monotonic() - self.scanned_at < 1
-            if not self.voices and not self.mic_live and not self.closed and not fresh:
+            if not self.voices and not self.closed and not fresh:
                 try:
                     self._open()
                 except Exception:
@@ -671,13 +674,15 @@ class Mixer:
                     self.mic_live = False
 
     def set_delay(self, ms):
-        """How long the live mic is held back, 0 to 1000 ms; at once, even mid-sentence."""
+        """Mic to speaker, 0 to 2000 ms; at once, even mid-sentence."""
         self.mic_delay = max(0.0, min(float(ms), MAX_DELAY * 1000)) / 1000
         if self.ring is not None:
             self.ring.set_delay(SR * self.mic_delay)
 
     def onair(self, on):
-        """The MIC pad: True = live, False = off. Returns False when there is no mic to go live with."""
+        """True = on the air, False = muted (the MIC pad). The choice holds: a mic that comes later follows it.
+        Returns False when there is no mic to put on the air."""
+        self.want_air = on
         if not on:
             with self.mic_lock:
                 self.mic_live = False
@@ -710,7 +715,7 @@ class Mixer:
         dev = self._mic_index()
         if dev < 0:
             raise LookupError("no microphone")
-        if self.ring is None:   # 1 s of delay, plus room for the two streams' blocks to wobble
+        if self.ring is None:   # the longest delay, plus room for the two streams' blocks to wobble
             self.ring = Ring(int(SR * MAX_DELAY) + SR // 4, prime=SR // 100, slack=SR * 3 // 100,
                              delay=SR * self.mic_delay)
         self.ring.clear()
@@ -839,8 +844,8 @@ class Mixer:
     def close(self):
         with self.open_lock:   # not halfway through watch() swapping streams
             self.closed = True
-            with self.mic_lock:
-                self.mic_live = False
+            with self.mic_lock:   # the one thing that takes the mic off the air without a press
+                self.want_air = self.mic_live = False
                 self._close_mic()
             if self.stream is not None:
                 self.stream.close()
@@ -1019,6 +1024,8 @@ def main():
     p = argparse.ArgumentParser(description="James' Radio: 24 sounds on glowing toy-style pads.")
     p.add_argument("--out", default="", help="part of the output device's name (default: Windows default)")
     p.add_argument("--no-window", action="store_true", help="serve the page but don't open a window")
+    p.add_argument("--mic-off", action="store_true",
+                   help="start with the microphone muted (the MIC pad puts it on the air)")
     p.add_argument("--share", nargs="?", const="auto", metavar="ADDRESS",
                    help="also serve the radio to phones and tablets on the home network (this PC's address, "
                         "or the one given); without it only this PC can open it")
@@ -1037,6 +1044,7 @@ def main():
         device = mixer._open()
     except Exception as e:   # no speaker yet: the page still opens and watch() keeps looking every 5 s
         device = f"no speaker yet ({e})"
+    mixer.onair(not a.mic_off)   # the mic is on the air from the start; the MIC pad mutes it
     sounds = render()
     radio = plugin_radio(mixer, sounds)
     loaded = plugins.load_all(radio)
@@ -1047,7 +1055,9 @@ def main():
         sys.exit(f"James' Radio: cannot listen on {address}: {e.strerror or e}")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=mixer.watch, daemon=True).start()
-    print(f"James' Radio on {url} -> {device}; plugins: {', '.join(loaded) or 'none'}", flush=True)
+    mic = "on the air" if mixer.mic_live else "muted" if mixer.inputs else "none yet"
+    print(f"James' Radio on {url} -> {device}; mic {mic}; "
+          f"plugins: {', '.join(loaded) or 'none'}", flush=True)
     if a.share:
         print(f"On a phone or tablet on the same Wi-Fi, open {url}\n"
               "The sound plays on this PC. Closing the radio's window here stops it for everyone.", flush=True)
@@ -1063,8 +1073,6 @@ def main():
                 break                               # the PC's window closed (a reload polls again within 3 s)
             if last and now - last > 150:
                 break                               # every page gone without saying bye (minimized pages poll slowly)
-            if mixer.mic_live and last and now - last > 10:
-                mixer.onair(False)                  # live, and no page left that could turn it off
             if last is None and now - started > (300 if a.share else 90):
                 break                               # page never opened (a phone needs longer to type the address)
     except KeyboardInterrupt:
@@ -1223,8 +1231,7 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
 .extras:empty { display: none; }
 .extras .well { width: 12rem; height: 10.5rem; aspect-ratio: auto; }
 .extras .micwell { width: 15rem; }
-/* The MIC pad: its own colour; live, it is a red ON AIR light. A finger holds it, so no scrolling from it. */
-.mic { touch-action: none; }
+/* The MIC pad: a red ON AIR light while the mic is on the air, grey when muted. */
 .well.onair { box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.6), 0 0 3rem .6rem #ff3b30, 0 .1rem 0 rgba(255,255,255,.08);
   animation: onair 1.6s ease-in-out infinite; }
 @keyframes onair { 50% { box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.6), 0 0 1.6rem .2rem #ff3b30, 0 .1rem 0 rgba(255,255,255,.08); } }
@@ -1394,7 +1401,7 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
         <div class="knob"><div class="klab"><label for="gain">Mic loudness</label><output id="gainout" for="gain">30%</output></div>
           <input id="gain" type="range" min="0" max="100" step="5" value="30"></div>
         <div class="knob"><div class="klab"><label for="delay">Delay</label><output id="delayout" for="delay">350 ms</output></div>
-          <input id="delay" type="range" min="0" max="1000" step="50" value="350"></div>
+          <input id="delay" type="range" min="0" max="2000" step="50" value="350"></div>
       </div>
     </div>
   </div>
@@ -1473,21 +1480,23 @@ function fire(i) {
   show(`${s.emoji} ${s.name}`);
 }
 
-// The MIC pad: the PC's microphone, out of the radio's own speaker, held back by the sheet's delay so you hear
-// yourself a moment later. A finger holds it live and letting go turns it off; a mouse click, Enter or M turns it
-// on and off. Any page can press it, and every page shows it: the state comes back from the PC with each poll.
-const MIC = { c: "#4fe3cf", d: "#109c88", e: "#06584d", t: "#05302a" }, AIR = { c: "#ff7a6b", d: "#d8261f", e: "#7d0b0b", t: "#fff" };
-const mic = makePad($("extras"), { key: "m", emoji: "\u{1F399}\uFE0F", name: "MIC", ...MIC }, null);
+// The MIC pad: the PC's microphone is on the air while the radio runs, out of the radio's own speaker, the
+// sheet's delay later. A tap, click, Enter or M mutes it, and the same again puts it back on the air. Any page
+// can press it, and every page shows it: the state comes back from the PC with each poll.
+const MUTED = { c: "#c3c8cf", d: "#848b95", e: "#41464d", t: "#1d2025" }, AIR = { c: "#ff7a6b", d: "#d8261f", e: "#7d0b0b", t: "#fff" };
+const MIKE = "\u{1F399}\uFE0F", HUSHED = "\u{1F507}";
+const mic = makePad($("extras"), { key: "m", emoji: MIKE, name: "ON AIR", ...AIR }, () => setMic(!live));
 mic.well.classList.add("micwell");
 mic.b.classList.add("mic");
 const lcd = document.querySelector(".lcd"), dly = $("dly");
-let micState = "off", micMine = false, micHeld = null, micTold = 0, touchUp = 0, delayMs = 350;
+let micState = "live", micTold = 0, delayMs = 350;
 function paintMic() {
   const on = micState === "live" || micState === "hush", none = micState === "none";
-  for (const [k, v] of Object.entries(on ? AIR : MIC)) mic.b.style.setProperty(`--${k}`, v);
+  for (const [k, v] of Object.entries(on ? AIR : MUTED)) mic.b.style.setProperty(`--${k}`, v);
   mic.well.classList.toggle("onair", on);
-  mic.b.querySelector(".lbl").textContent = none ? "NO MIC" : on ? "ON AIR" : "MIC";
-  mic.b.setAttribute("aria-pressed", String(on));
+  mic.b.querySelector(".emo").textContent = on || none ? MIKE : HUSHED;
+  mic.b.querySelector(".lbl").textContent = none ? "NO MIC" : on ? "ON AIR" : "MUTED";
+  mic.b.setAttribute("aria-label", none ? "No microphone" : on ? "Microphone on the air. Mute" : "Microphone muted. Put it on the air");
   mic.b.setAttribute("aria-disabled", String(none));
   lcd.classList.toggle("onair", on);
   dly.hidden = !on;
@@ -1497,32 +1506,10 @@ function paintMic() {
 function setMic(on) {
   if (micState === "none" || on === live) return;
   micState = on ? "live" : "off";
-  micMine = on;
   micTold = performance.now();
   post(`/onair/${on ? "on" : "off"}`);
   paintMic();
 }
-mic.b.addEventListener("pointerdown", (e) => {
-  if (e.button > 0 || micState === "none") return;
-  e.preventDefault();
-  mic.b.classList.add("down");
-  if (e.pointerType === "mouse") return;   // a mouse turns it on and off with the click below
-  micHeld = e.pointerId;
-  try { mic.b.setPointerCapture(e.pointerId); } catch (_) {}
-  setMic(true);
-});
-function letGo(e) {
-  if (micHeld !== e.pointerId) return;
-  micHeld = null;
-  touchUp = performance.now();
-  mic.b.classList.remove("down");
-  setMic(false);
-}
-for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) mic.b.addEventListener(t, letGo);
-mic.b.addEventListener("click", () => {
-  if (micHeld === null && performance.now() - touchUp > 700) setMic(!live);   // not the click a lifted finger sends
-});
-document.addEventListener("visibilitychange", () => { if (document.hidden && micMine && live) setMic(false); });
 paintMic();
 
 // Plugin buttons (plugins/*.py) are pads too. A label that starts with an emoji uses it as the picture.
@@ -1637,7 +1624,7 @@ addEventListener("keydown", (e) => {
   if (sheet.open || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;   // keys belong to the sheet while it is up
   const k = e.key.toLowerCase();
   if (k === " " || k === "escape") { e.preventDefault(); stop.classList.add("down"); stopAll(); return; }
-  if (k === "m" && e.target !== vol) { mic.b.classList.add("down"); setMic(!live); return; }
+  if (k === "m" && e.target !== vol) { mic.b.classList.add("down"); setMic(!live); return; }   // mute / on the air
   if (k in byKey && e.target !== vol) { SOUNDS[byKey[k]].b.classList.add("down"); fire(byKey[k]); }
 });
 addEventListener("keyup", (e) => {
@@ -1673,20 +1660,16 @@ async function poll() {
     if (m !== micState && performance.now() - micTold > 600) {   // a fresh press wins over a poll already on its way
       if (m === "hush" && micState === "live") show("TOO LOUD, MOVE THE MIC");
       micState = m;
-      if (m !== "live" && m !== "hush") micMine = false;
       paintMic();
     }
-    const lv = live ? micLevel : level;   // ON AIR: the meter is the mic's
+    const lv = live ? Math.max(level, micLevel) : level;   // on the air: the voice moves the meter as well as the pads
     shown = Math.max(Math.round(Math.min(1, Math.sqrt(lv) * 1.6) * segs.length), shown - 1);
     segs.forEach((g, k) => g.classList.toggle("on", k < shown));
   } catch (e) {}
   setTimeout(poll, 80);
 }
 poll();
-addEventListener("pagehide", () => {
-  if (micMine && live) navigator.sendBeacon(`/onair/off?t=${TOKEN}`);   // a page that goes takes its mic with it
-  navigator.sendBeacon(`/bye?t=${TOKEN}`);
-});
+addEventListener("pagehide", () => navigator.sendBeacon(`/bye?t=${TOKEN}`));
 </script>
 </body></html>
 """

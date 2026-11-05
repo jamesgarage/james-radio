@@ -92,10 +92,10 @@ class Delay(unittest.TestCase):
         return int(np.argmax(np.abs(out)))
 
     def test_a_click_lands_after_the_delay(self):
-        for ms in (350, 0, 1000):
+        for ms in (350, 0, 1000, 2000):
             with self.subTest(ms=ms):
                 mixer, t = self.live(ms), 4800
-                self.assertLess(abs(self.landing(mixer, t, 1.5) - (t + ms * SR // 1000)), BLOCK)
+                self.assertLess(abs(self.landing(mixer, t, ms / 1000 + 0.5) - (t + ms * SR // 1000)), BLOCK)
 
     def test_the_default_is_350_ms(self):
         w = World(mics=MICS, mic_default=1)
@@ -109,10 +109,10 @@ class Delay(unittest.TestCase):
         out = run(mixer, 0.6, click_at(9600))
         self.assertLess(abs(int(np.argmax(np.abs(out))) - (9600 + 4800)), BLOCK)
 
-    def test_out_of_range_delays_are_held_to_0_to_1000_ms(self):
+    def test_out_of_range_delays_are_held_to_0_to_2000_ms(self):
         mixer = self.live(350)
         mixer.set_delay(5000)
-        self.assertEqual(mixer.mic_delay, 1.0)
+        self.assertEqual(mixer.mic_delay, 2.0)
         mixer.set_delay(-20)
         self.assertEqual(mixer.mic_delay, 0.0)
 
@@ -159,27 +159,51 @@ class Mixing(unittest.TestCase):
         self.assertTrue(w.mic()[0].active and w.mic()[0] is not first)
         self.assertEqual(w.mixer.mic_state(), "live")
 
-    def test_windows_default_moving_waits_for_the_mic_to_be_off(self):
+    def test_a_new_default_speaker_takes_the_mic_along(self):
         w = World(mics=MICS, mic_default=1)
-        w.mixer.onair(True)
-        scans = SD.scans
+        w.mixer.onair(True)               # always on the air, so speaker changes cannot wait for it to stop
+        first = w.mic()[0]
         w.set_default(0)
         w.mixer._tick()
-        self.assertEqual(SD.scans, scans)          # not while someone is on the mic
-        w.mixer.onair(False)
-        w.mixer._tick()
         self.assertEqual(w.playing(), "Speakers (SoundWire Speakers)")
+        self.assertTrue(w.mic()[0].active and w.mic()[0] is not first)
+        self.assertEqual(w.mixer.mic_state(), "live")
 
-    def test_a_mic_plugged_in_later_is_found(self):
+    def test_a_new_default_mic_is_followed(self):
+        w = World(mics=MICS, mic_default=1)
+        w.mixer.onair(True)
+        w.set_mic_default(0)
+        w.mixer._tick()
+        self.assertEqual((w.mic()[1], w.mixer.mic_state()), (MICS[0], "live"))
+
+    def test_nothing_but_a_press_or_closing_takes_it_off_the_air(self):
+        w = World(mics=MICS, mic_default=1)
+        w.mixer.onair(True)
+        for _ in range(3):
+            w.mixer._tick()
+        self.assertEqual(w.mixer.mic_state(), "live")
+        w.mixer.close()
+        self.assertFalse(w.mic()[0].active)
+        self.assertEqual(w.mixer.mic_state(), "off")
+
+    def test_a_mic_plugged_in_later_goes_on_the_air(self):
         w = World()
         self.assertEqual(w.mixer.mic_state(), "none")
-        self.assertFalse(w.mixer.onair(True))
+        self.assertFalse(w.mixer.onair(True))   # what the radio asks for at start
         self.assertEqual(SD.mics, [])
         w.mic_idx = [SD.add(MICS[1], outputs=0, inputs=1)]
         w.set_mic_default(0)
         w.mixer._tick()
+        self.assertEqual(w.mixer.mic_state(), "live")
+
+    def test_a_muted_mic_stays_muted(self):
+        w = World(mics=MICS, mic_default=1)
+        w.mixer.onair(True)
+        w.mixer.onair(False)
+        w.set_mic_default(0)                    # even when Windows' default mic changes
+        w.mixer._tick()
         self.assertEqual(w.mixer.mic_state(), "off")
-        self.assertTrue(w.mixer.onair(True))
+        self.assertFalse(any(m.active for m in SD.mics))
 
 
 @needs_numpy
@@ -276,7 +300,7 @@ class MicRoutes(unittest.TestCase):
         self.assertEqual((r["follow"], r["default"], r["missing"], r["gain"], r["delay"]),
                          (True, "Microphone", False, 30, 350))
 
-    def test_on_air_and_off(self):
+    def test_on_air_and_muted(self):
         self.assertEqual(self.level()["mic"], "off")
         self.assertEqual(self.post("onair/on"), 204)
         self.assertEqual((self.level()["mic"], self.level()["delay"]), ("live", 350))
@@ -299,10 +323,10 @@ class MicRoutes(unittest.TestCase):
 
     def test_the_knobs(self):
         self.assertEqual(self.post("micgain/50"), 204)
-        self.assertEqual(self.post("micdelay/1000"), 204)
-        self.assertEqual((self.listing()["gain"], self.level()["delay"]), (50, 1000))
+        self.assertEqual(self.post("micdelay/2000"), 204)
+        self.assertEqual((self.listing()["gain"], self.level()["delay"]), (50, 2000))
         self.assertEqual(self.post("micdelay/5000"), 204)
-        self.assertEqual(self.level()["delay"], 1000)
+        self.assertEqual(self.level()["delay"], 2000)
         self.assertEqual(self.post("micgain/loud"), 400)
         self.assertEqual(self.post("onair/maybe"), 404)
         self.assertEqual(self.post("mic/99"), 404)

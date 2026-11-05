@@ -13,7 +13,7 @@ Tap a pad or press its key. The keys follow the grid's shape on the keyboard:
 | 3 | `A S D F G H` | Fart, Boing, Slide whistle, Bubbles, Crickets, Ghost |
 | 4 | `Z X C V B N` | Laser, Explosion, Robot, Power up, Magic, Record scratch |
 
-**M** turns the MIC pad on and off (below). **Space** (or Esc) stops all sounds. The page also has a STOP button, a volume fader (0-150%) and a level meter.
+**M** mutes the microphone and puts it back on the air (below). **Space** (or Esc) stops all sounds. The page also has a STOP button, a volume fader (0-150%) and a level meter.
 
 Python plays the sound through one audio stream. The radio itself is a small web page served on 127.0.0.1
 only (unless you share it with a phone, below), opened in a Microsoft Edge app window (or your default browser
@@ -46,6 +46,7 @@ Options:
 - `--no-window` serves the page but does not open a window. The program prints the address; open it within
   90 seconds (5 minutes with `--share`), or the program exits.
 - `--share` also lets phones and tablets on the same Wi-Fi play the radio; see below.
+- `--mic-off` starts with the microphone muted; the MIC pad puts it on the air.
 
 To find device names, list them with the microphone tool below: `uv run mic_echo.py --list`.
 
@@ -89,19 +90,20 @@ plain `py -3 -m unittest discover -s tests` also works and skips the mic tests, 
 
 ## The MIC pad
 
-The big MIC pad puts the PC's microphone on the air: you hear yourself out of the same speaker as the pads, a
-moment later. On a touch screen, hold the pad to talk and let go to stop. With a mouse, click it once to go on
-the air and again to stop (or press **M**). While it is on, the pad and the display say ON AIR, the display
-shows the delay, and the level meter follows the mic. A phone playing the radio can press it too; it is always
-the PC's microphone.
+While the radio runs, the PC's microphone is on the air: you hear yourself out of the same speaker as the pads,
+a moment later. The display says ON AIR and shows the delay, and the level meter moves with your voice. The big
+MIC pad is the mute: tap or click it (or press **M**) and it says MUTED; do it again and the mic is back on the
+air. A phone playing the radio can press it too; it is always the PC's microphone.
 
 - Tap the speaker name under the display to choose the microphone (Windows default first), its loudness
-  (default 30%) and the delay (0 to 1000 ms, default 350 ms; 0 is straight through).
+  (default 30%) and the delay from the mic to the speaker (0 to 2000 ms, default 350 ms; 0 is straight
+  through).
 - If the speaker starts to howl, the radio mutes the mic for 2 seconds and the display says "too loud, move the
   mic". Point the mic away from the speaker, or turn it down.
-- With no microphone plugged in, the pad says NO MIC and does nothing.
-- The microphone is only open while the pad is on. A Bluetooth headset's mic switches the headset to
-  phone-call sound quality while it is on; that is Bluetooth, not the radio.
+- With no microphone plugged in, the pad says NO MIC and does nothing. A microphone plugged in later goes on
+  the air by itself (unless the pad was muted).
+- The microphone is open only while it is on the air, and closing the radio takes it off. A Bluetooth headset's
+  mic switches the headset to phone-call sound quality while it is on; that is Bluetooth, not the radio.
 
 ## Microphone echo (mic_echo.py)
 
