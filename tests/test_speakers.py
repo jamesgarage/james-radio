@@ -27,6 +27,8 @@ class FakeStream:
         self.sd, self.device, self.callback, self.active = sd, device, callback, False
 
     def start(self):
+        if not self.sd.thread_ok():
+            raise self.sd.PortAudioError("Error starting stream: Unanticipated host error")
         self.active = True
 
     def close(self):
@@ -44,6 +46,7 @@ class FakeSD(types.ModuleType):
                          "max_input_channels": 0}]   # MME: ignored
         self.default = self.default_in = -1
         self.scans, self.opened, self.mics = 0, [], []
+        self.scan_thread, self.thread_ok = None, lambda: True   # a test can make starts as picky as WASAPI's
 
     def add(self, name, outputs=2, inputs=0):
         self.devices.append({"name": name, "hostapi": 1, "max_output_channels": outputs, "max_input_channels": inputs})
@@ -62,7 +65,7 @@ class FakeSD(types.ModuleType):
         self.scans += 1
 
     def _initialize(self):
-        pass
+        self.scan_thread = threading.get_ident()
 
     def WasapiSettings(self, **kw):
         return kw

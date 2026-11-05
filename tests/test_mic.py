@@ -251,6 +251,53 @@ class HowlGuard(unittest.TestCase):
 
 
 @needs_numpy
+class AnyThread(unittest.TestCase):
+    """WASAPI starts a stream only on a thread that has COM, and PortAudio gives COM only to the thread that scans.
+    Page presses arrive on server threads and the 5 s look runs on its own: the mic must still go on the air (it
+    did not, live: POST /onair/on answered 409 and the look kept failing)."""
+
+    def setUp(self):
+        SD.thread_ok = lambda: threading.get_ident() == SD.scan_thread or getattr(radio._com_threads, "ready", False)
+        self.addCleanup(setattr, SD, "thread_ok", lambda: True)
+
+    @staticmethod
+    def on_thread(fn):
+        box = {}
+        t = threading.Thread(target=lambda: box.update(r=fn()))
+        t.start()
+        t.join()
+        return box.get("r")
+
+    def test_on_the_air_from_a_thread_that_did_not_scan(self):
+        w = World(mics=MICS, mic_default=1)
+        self.assertTrue(self.on_thread(lambda: w.mixer.onair(True)))
+        self.assertEqual(w.mixer.mic_state(), "live")
+        self.assertTrue(w.mic()[0].active)
+
+    def test_the_5_s_look_retries_without_a_rescan(self):
+        w = World(mics=MICS, mic_default=1)
+        w.mixer.want_air = True                   # on the air was asked for, and the open at start did not take
+        scans = SD.scans
+        self.on_thread(w.mixer._tick)             # nothing changed in Windows: no re-scan on the watch thread
+        self.assertEqual(SD.scans, scans)
+        self.assertEqual(w.mixer.mic_state(), "live")
+
+    def test_a_page_press_over_http(self):
+        w = World(mics=MICS, mic_default=1)
+        api = plugins.Radio(["Ding!"], lambda s: None, lambda f, s: None, lambda s: None, log=lambda line: None)
+        server, url, _ = radio.make_server(w.mixer, [("Ding!", "x", [0.0] * 480)], api)
+        threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with urllib.request.urlopen(url, timeout=5) as r:
+            token = re.search(r'TOKEN = "([^"]+)"', r.read().decode("utf-8")).group(1)
+        req = urllib.request.Request(f"{url}onair/on?t={token}", method="POST", data=b"")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual(r.status, 204)
+        self.assertEqual(w.mixer.mic_state(), "live")
+
+
+@needs_numpy
 class MicRoutes(unittest.TestCase):
     """GET /mics and POST /mic, /micgain, /micdelay, /onair on the real server, over a real local socket."""
 

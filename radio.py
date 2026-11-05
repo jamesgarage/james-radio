@@ -382,6 +382,20 @@ def short_name(name, names=()):
     return base if len(base) <= 22 else base[:21].rstrip() + "…"
 
 
+_com_threads = threading.local()
+
+
+def com_ready():
+    """Give this thread COM, once. PortAudio's WASAPI streams only start on a thread that has it, and PortAudio sets
+    it up only on the thread that scans the devices: a mic opened from a page press (a server thread) or from the
+    5 s look (the watch thread) failed with "Unanticipated host error". Never undone; the thread's end cleans up."""
+    if not getattr(_com_threads, "ready", False):
+        if os.name == "nt":
+            import ctypes
+            ctypes.windll.ole32.CoInitializeEx(None, 0)   # S_OK; S_FALSE or RPC_E_CHANGED_MODE: it had COM already
+        _com_threads.ready = True
+
+
 def _com(obj, slot, *argtypes):
     """Method number `slot` (vtable order) of the COM object `obj`, called with the remaining arguments."""
     import ctypes
@@ -597,6 +611,7 @@ class Mixer:
 
     def _scan(self):
         """Re-scan the devices (PortAudio only knows the list from when it started); the default output's index."""
+        com_ready()
         sd._terminate()
         sd._initialize()
         self.scanned_at = time.monotonic()
@@ -715,6 +730,7 @@ class Mixer:
         dev = self._mic_index()
         if dev < 0:
             raise LookupError("no microphone")
+        com_ready()
         if self.ring is None:   # the longest delay, plus room for the two streams' blocks to wobble
             self.ring = Ring(int(SR * MAX_DELAY) + SR // 4, prime=SR // 100, slack=SR * 3 // 100,
                              delay=SR * self.mic_delay)
@@ -830,6 +846,7 @@ class Mixer:
             if seconds <= 0:
                 return np.zeros(0, np.float32)
             try:
+                com_ready()
                 with sd.InputStream(device=mic, samplerate=SR, channels=1, dtype="float32",
                                     extra_settings=sd.WasapiSettings(auto_convert=True)) as stream:
                     data, _ = stream.read(int(SR * seconds))
