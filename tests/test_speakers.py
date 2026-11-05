@@ -23,8 +23,8 @@ import plugins  # noqa: E402
 
 
 class FakeStream:
-    def __init__(self, sd, device, **settings):
-        self.sd, self.device, self.active = sd, device, False
+    def __init__(self, sd, device, callback=None, **settings):
+        self.sd, self.device, self.callback, self.active = sd, device, callback, False
 
     def start(self):
         self.active = True
@@ -40,17 +40,19 @@ class FakeSD(types.ModuleType):
 
     def __init__(self):
         super().__init__("sounddevice")
-        self.devices = [{"name": "Speakers (Old Driver)", "hostapi": 0, "max_output_channels": 2}]   # MME: ignored
-        self.default = -1
-        self.scans, self.opened = 0, []
+        self.devices = [{"name": "Speakers (Old Driver)", "hostapi": 0, "max_output_channels": 2,
+                         "max_input_channels": 0}]   # MME: ignored
+        self.default = self.default_in = -1
+        self.scans, self.opened, self.mics = 0, [], []
 
-    def add(self, name, outputs=2):
-        self.devices.append({"name": name, "hostapi": 1, "max_output_channels": outputs})
+    def add(self, name, outputs=2, inputs=0):
+        self.devices.append({"name": name, "hostapi": 1, "max_output_channels": outputs, "max_input_channels": inputs})
         return len(self.devices) - 1
 
     def query_hostapis(self, i=None):
-        apis = [{"name": "MME", "default_output_device": 0},
-                {"name": "Windows WASAPI", "default_output_device": self.default}]
+        apis = [{"name": "MME", "default_output_device": 0, "default_input_device": -1},
+                {"name": "Windows WASAPI", "default_output_device": self.default,
+                 "default_input_device": self.default_in}]
         return apis if i is None else apis[i]
 
     def query_devices(self, i=None):
@@ -69,6 +71,11 @@ class FakeSD(types.ModuleType):
         self.opened.append(device)
         return FakeStream(self, device, **settings)
 
+    def InputStream(self, device, **settings):
+        stream = FakeStream(self, device, **settings)
+        self.mics.append(stream)
+        return stream
+
 
 SD = FakeSD()
 sys.modules["sounddevice"] = SD
@@ -84,17 +91,29 @@ class World:
     """A fresh fake PC: its speakers, Windows' default among them, and a mixer on it."""
 
     def __init__(self, names=("Speakers (SoundWire Speakers)", "Airpod Max (Sam's AirPods Max)"), default=1,
-                 out=""):
+                 out="", mics=(), mic_default=0):
         SD.devices[1:] = []
         SD.opened.clear()
+        SD.mics.clear()
         self.idx = [SD.add(n) for n in names]
+        self.mic_idx = [SD.add(n, outputs=0, inputs=1) for n in mics]
         self.set_default(default)
-        self.mixer = radio.Mixer(out, default_id=lambda: self.default_id)
+        self.set_mic_default(mic_default if mics else None)
+        self.mixer = radio.Mixer(out, default_id=lambda: self.default_id, mic_default_id=lambda: self.mic_default_id)
         self.mixer._open()
 
     def set_default(self, k):
         SD.default = self.idx[k]
         self.default_id = f"endpoint-{k}"
+
+    def set_mic_default(self, k):
+        SD.default_in = -1 if k is None else self.mic_idx[k]
+        self.mic_default_id = None if k is None else f"mic-{k}"
+
+    def mic(self):
+        """The mic's stream as last opened, and the name of its device."""
+        stream = SD.mics[-1] if SD.mics else None
+        return stream, SD.devices[stream.device]["name"] if stream else None
 
     def playing(self):
         return SD.devices[SD.opened[-1]]["name"] if SD.opened else None

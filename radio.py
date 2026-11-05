@@ -8,7 +8,8 @@
     uv run radio.py --out "Speakers (USB"
     uv run radio.py --share                       # phones and tablets on the same Wi-Fi can play it too
 
-Keys 123456 / QWERTY / ASDFGH / ZXCVBN play the pads (the grid's shape on the keyboard); Space stops all.
+Keys 123456 / QWERTY / ASDFGH / ZXCVBN play the pads (the grid's shape on the keyboard); Space stops all;
+M turns the MIC pad (the PC's microphone, through the radio's speaker) on and off.
 The page is served on 127.0.0.1 only, unless --share asks for the home network too; closing the window ends
 the program.
 """
@@ -31,7 +32,6 @@ import numpy as np
 import sounddevice as sd
 
 import plugins
-from mic_echo import api_index, find   # the microphone lookup is mic_echo's, not a second copy
 
 SR = 48000
 rng = np.random.default_rng(7)
@@ -391,9 +391,17 @@ def _com(obj, slot, *argtypes):
 
 
 def windows_default_speaker():
-    """An id for Windows' default speaker that changes when someone picks another one; None if Windows won't say.
-    Asked of Windows' audio service (Core Audio) directly: PortAudio only learns of a new default by re-scanning,
-    and a re-scan closes the stream that is playing."""
+    return windows_default(0)
+
+
+def windows_default_mic():
+    return windows_default(1)
+
+
+def windows_default(flow):
+    """An id for Windows' default speaker (flow 0) or microphone (flow 1) that changes when someone picks another
+    one; None if Windows won't say. Asked of Windows' audio service (Core Audio) directly: PortAudio only learns
+    of a new default by re-scanning, and a re-scan closes the streams that are open."""
     if os.name != "nt":
         return None
     import ctypes
@@ -406,8 +414,8 @@ def windows_default_speaker():
         enum, dev, text = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
         if ole32.CoCreateInstance(clsid, None, 1, iid, ctypes.byref(enum)) < 0 or not enum:
             return None
-        try:   # GetDefaultAudioEndpoint(eRender, eMultimedia): the role PortAudio's WASAPI default uses
-            if _com(enum, 4, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(0, 1, ctypes.byref(dev)) < 0:
+        try:   # GetDefaultAudioEndpoint(eRender or eCapture, eMultimedia): the role PortAudio's WASAPI default uses
+            if _com(enum, 4, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(flow, 1, ctypes.byref(dev)) < 0:
                 return None
             try:
                 if _com(dev, 5, ctypes.POINTER(ctypes.c_void_p))(ctypes.byref(text)) < 0:   # IMMDevice::GetId
@@ -427,14 +435,107 @@ def windows_default_speaker():
             ole32.CoUninitialize()
 
 
+MIC_GAIN = 0.3        # the live mic's loudness to start with; the sheet's slider goes 0 to 1
+MIC_DELAY = 0.35      # seconds the mic is held back, so you hear yourself a moment later; 0 = live
+MAX_DELAY = 1.0
+CEILING = 0.95        # limit() never passes 1.0; from 0.95 on it is flat out
+MIC_FULL = 0.98       # the mic itself at full scale
+MIC_LOUD = 0.5        # loud enough at the mic to be what pins the speaker
+HOWL_SECONDS = 0.3    # pinned this long while the mic is live = feedback (or a shout right into it)
+HUSH_SECONDS = 2.0    # ...and the mic is muted this long
+
+
+class Ring:
+    """The live mic's samples, handed from the mic's callback to the speaker's (two threads, each at its own pace)
+    and held back `delay` samples on the way. A fixed buffer that never blocks or grows: a write that overflows
+    drops the oldest samples; a read that runs dry plays silence and waits for `prime` samples before playing
+    again; a backlog more than `slack` past the delay is skipped, so the voice never drifts further behind."""
+
+    def __init__(self, size, prime=0, slack=None, delay=0):
+        self.buf, self.size, self.prime, self.slack = np.zeros(size, np.float32), size, prime, slack
+        self.lock = threading.Lock()
+        self.start = self.count = self.delay = 0
+        self.primed = False
+        self.set_delay(delay)
+
+    def _drop(self, k):
+        self.start, self.count = (self.start + k) % self.size, self.count - k
+
+    def _zero(self, at, k):
+        first = min(k, self.size - at)
+        self.buf[at:at + first] = 0
+        self.buf[:k - first] = 0
+
+    def write(self, x):
+        x = np.asarray(x, np.float32).ravel()[-self.size:]
+        with self.lock:
+            end = (self.start + self.count) % self.size
+            first = min(len(x), self.size - end)
+            self.buf[end:end + first] = x[:first]
+            self.buf[:len(x) - first] = x[first:]
+            self.count += len(x)
+            if self.count > self.size:   # full: the oldest go
+                self._drop(self.count - self.size)
+
+    def read(self, n):
+        """The next n samples, oldest first; silence where there are none yet."""
+        out = np.zeros(n, np.float32)
+        with self.lock:
+            if not self.primed and self.count < max(self.prime, n):
+                return out
+            if self.slack is not None and self.count - n > self.delay + self.slack:   # fell behind: skip ahead
+                self._drop(self.count - n - self.delay)
+            k = min(n, self.count)
+            first = min(k, self.size - self.start)
+            out[:first] = self.buf[self.start:self.start + first]
+            out[first:k] = self.buf[:k - first]
+            self._drop(k)
+            self.primed = k == n
+        return out
+
+    def set_delay(self, samples):
+        """Hold the voice back this many samples from now on: silence goes in front of what is waiting, or the
+        oldest of it is skipped."""
+        samples = max(0, min(int(samples), self.size - (self.slack or 0) - max(self.prime, 1)))
+        with self.lock:
+            more = samples - self.delay
+            self.delay = samples
+            if more > 0:
+                more = min(more, self.size - self.count)
+                self.start = (self.start - more) % self.size
+                self._zero(self.start, more)
+                self.count += more
+            elif more < 0:
+                self._drop(min(-more, self.count))
+
+    def clear(self):
+        """Nothing waiting but the delay's silence."""
+        with self.lock:
+            self.start, self.count, self.primed = 0, self.delay, False
+            self._zero(0, self.delay)
+
+
+def _listing(key, listed, picked, pin, default):
+    """A device list for the page's sheet: a short name for each row, the full one underneath."""
+    names = [n for _, n in listed]
+    return {"follow": pin is None, "missing": bool(pin) and picked is None,
+            "pinned": short_name(pin, names + [pin]) if pin else "",
+            "default": short_name(default, names) if default else "",
+            key: [{"index": i, "name": n, "short": short_name(n, names), "picked": i == picked} for i, n in listed]}
+
+
 class Mixer:
     """One output stream; overlapping sounds are summed in the callback.
 
     Which speaker: the one picked on the page, else the one named with --out, else Windows' default, followed
     when it changes. Changes wait for the sounds playing to end. A picked or named speaker that is away is waited
-    for on Windows' default."""
+    for on Windows' default.
 
-    def __init__(self, out_part, default_id=windows_default_speaker):
+    The MIC pad's microphone has its own input stream, open only while the mic is live. Its callback feeds a ring
+    that the output callback mixes from, so the voice always comes out of the same speaker as the pads. The mic
+    is the one picked on the page, else Windows' default."""
+
+    def __init__(self, out_part, default_id=windows_default_speaker, mic_default_id=windows_default_mic):
         self.voices, self.lock, self.volume, self.stream = [], threading.Lock(), 1.0, None
         self.level, self.open_lock, self.device, self.fallback = 0.0, threading.Lock(), "", False
         self.closed = False
@@ -443,6 +544,14 @@ class Mixer:
         self.outputs = []   # (index, name) of every WASAPI output at the last scan
         self.listed, self.default_name = [], ""   # the outputs as the page's picker last showed them; the default's name
         self.switch = False   # a speaker was picked while sounds played: change over when they end
+        self.scanned_at = 0.0
+        # the live mic: mic_lock guards its stream (lock order: open_lock, then mic_lock)
+        self.mic_lock, self.mic_stream, self.mic_live, self.ring = threading.Lock(), None, False, None
+        self.mic_pin = None   # the picked mic's exact name; None: Windows' default
+        self.mic_default_id, self.seen_mic_default = mic_default_id, None
+        self.inputs, self.mics_listed, self.default_in, self.default_mic = [], [], -1, ""
+        self.mic_gain, self.mic_delay, self.mic_level = MIC_GAIN, MIC_DELAY, 0.0
+        self.hot = self.hush = 0   # the howl guard, in frames: pinned so far, still muted
 
     def label(self):
         """The speaker's short name, for the display."""
@@ -454,30 +563,50 @@ class Mixer:
         return name == self.pin if self.pin_exact else self.pin.lower() in name.lower()
 
     def _open(self):
-        """(Re)open on the speaker we should be on (see the class note). Re-scans the devices first."""
-        if self.stream is not None:
-            self.stream.close()
-            self.stream = None
-        self.device, self.switch = "No speaker", False   # what the page shows until a stream opens
-        self.seen_default = self.default_id()   # before the scan: a change after this is caught on the next look
-        sd._terminate()              # re-scan devices: PortAudio only knows the list from when it started
+        """(Re)open on the speaker we should be on (see the class note). Re-scans the devices first; a re-scan
+        closes every stream, so a live mic is closed before it and opened again after."""
+        with self.mic_lock:
+            self._close_mic()
+            if self.stream is not None:
+                self.stream.close()
+                self.stream = None
+            self.device, self.switch = "No speaker", False   # what the page shows until a stream opens
+            self.seen_default = self.default_id()   # before the scan: a change after this is caught on the next look
+            self.seen_mic_default = self.mic_default_id()
+            default = self._scan()
+            try:
+                wanted = [i for i, name in self.outputs if self._pinned(name)]
+                dev = wanted[0] if wanted else default
+                if dev < 0:
+                    raise LookupError("Windows has no output device")
+                self.fallback = bool(self.pin) and not wanted
+                ch = min(2, sd.query_devices(dev)["max_output_channels"])
+                self.stream = sd.OutputStream(device=dev, samplerate=SR, channels=ch, dtype="float32", latency="low",
+                                              callback=self._mix, extra_settings=sd.WasapiSettings(auto_convert=True))
+                self.stream.start()
+                self.device = sd.query_devices(dev)["name"]
+            finally:
+                if self.mic_live:
+                    try:
+                        self._open_mic()
+                    except Exception:
+                        self.mic_live = False
+            return self.device
+
+    def _scan(self):
+        """Re-scan the devices (PortAudio only knows the list from when it started); the default output's index."""
+        sd._terminate()
         sd._initialize()
+        self.scanned_at = time.monotonic()
         api = next(i for i, a in enumerate(sd.query_hostapis()) if a["name"] == "Windows WASAPI")
-        self.outputs = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
-                        if d["hostapi"] == api and d["max_output_channels"] > 0]
-        default = sd.query_hostapis(api)["default_output_device"]
-        self.default_name = dict(self.outputs).get(default, "")
-        wanted = [i for i, name in self.outputs if self._pinned(name)]
-        dev = wanted[0] if wanted else default
-        if dev < 0:
-            raise LookupError("Windows has no output device")
-        self.fallback = bool(self.pin) and not wanted
-        ch = min(2, sd.query_devices(dev)["max_output_channels"])
-        self.stream = sd.OutputStream(device=dev, samplerate=SR, channels=ch, dtype="float32", latency="low",
-                                      callback=self._mix, extra_settings=sd.WasapiSettings(auto_convert=True))
-        self.stream.start()
-        self.device = sd.query_devices(dev)["name"]
-        return self.device
+        devices = [(i, d) for i, d in enumerate(sd.query_devices()) if d["hostapi"] == api]
+        self.outputs = [(i, d["name"]) for i, d in devices if d["max_output_channels"] > 0]
+        self.inputs = [(i, d["name"]) for i, d in devices if d["max_input_channels"] > 0]
+        info = sd.query_hostapis(api)
+        self.default_name = dict(self.outputs).get(info["default_output_device"], "")
+        self.default_in = info["default_input_device"]
+        self.default_mic = dict(self.inputs).get(self.default_in, "")
+        return info["default_output_device"]
 
     def watch(self):
         """Every 5 s: reopen a dead stream. Between sounds, also move to Windows' new default speaker, or back to
@@ -493,7 +622,8 @@ class Mixer:
             if self.closed:
                 return False
             dead = self.stream is None or not self.stream.active
-            if dead or (not self.voices and (self.fallback or self.switch or self._default_moved())):   # never cut a sound short
+            busy = self.voices or self.mic_live   # never cut a sound short, or someone on the mic
+            if dead or (not busy and (self.fallback or self.switch or self._default_moved())):
                 try:
                     self._open()
                 except Exception:
@@ -504,19 +634,105 @@ class Mixer:
         """The page's speaker list. Re-scanned when nothing is playing, so a speaker switched on a moment ago is in
         it (a re-scan reopens the stream, which is why it waits for silence)."""
         with self.open_lock:
-            if not self.voices and not self.closed:
+            if not self.voices and not self.mic_live and not self.closed:
                 try:
                     self._open()
                 except Exception:
                     pass
             self.listed = list(self.outputs)
-            names = [n for _, n in self.listed]
             picked = next((i for i, n in self.listed if self._pinned(n)), None)
-            return {"follow": self.pin is None, "missing": bool(self.pin) and picked is None,
-                    "pinned": short_name(self.pin, names + [self.pin]) if self.pin else "",
-                    "default": short_name(self.default_name, names) if self.default_name else "",
-                    "speakers": [{"index": i, "name": n, "short": short_name(n, names), "picked": i == picked}
-                                 for i, n in self.listed]}
+            return _listing("speakers", self.listed, picked, self.pin, self.default_name)
+
+    def mics(self):
+        """The page's microphone list, with the mic's loudness (%) and delay (ms). Re-scanned like speakers(),
+        unless that has just been done (the sheet asks for both)."""
+        with self.open_lock:
+            fresh = time.monotonic() - self.scanned_at < 1
+            if not self.voices and not self.mic_live and not self.closed and not fresh:
+                try:
+                    self._open()
+                except Exception:
+                    pass
+            self.mics_listed = list(self.inputs)
+            picked = next((i for i, n in self.mics_listed if n == self.mic_pin), None)
+            return dict(_listing("mics", self.mics_listed, picked, self.mic_pin, self.default_mic),
+                        gain=round(self.mic_gain * 100), delay=round(self.mic_delay * 1000))
+
+    def choose_mic(self, index):
+        """The page's mic pick, like choose(); it also holds for Call in. A live mic moves over at once.
+        KeyError: not in the list the page was shown."""
+        with self.mic_lock:
+            self.mic_pin = None if index is None else dict(self.mics_listed)[index]
+            if self.mic_live:
+                self._close_mic()
+                try:
+                    self._open_mic()
+                except Exception:
+                    self.mic_live = False
+
+    def set_delay(self, ms):
+        """How long the live mic is held back, 0 to 1000 ms; at once, even mid-sentence."""
+        self.mic_delay = max(0.0, min(float(ms), MAX_DELAY * 1000)) / 1000
+        if self.ring is not None:
+            self.ring.set_delay(SR * self.mic_delay)
+
+    def onair(self, on):
+        """The MIC pad: True = live, False = off. Returns False when there is no mic to go live with."""
+        if not on:
+            with self.mic_lock:
+                self.mic_live = False
+                self._close_mic()
+            return True
+        self._ready()   # the voice comes out of the speaker's stream
+        with self.mic_lock:
+            if self.mic_live and self.mic_stream is not None:
+                return True
+            try:
+                self._open_mic()
+            except Exception:   # LookupError: no mic; PortAudioError: it would not open
+                self._close_mic()
+                return False
+            self.mic_live = True
+            return True
+
+    def mic_state(self):
+        """For the page: "none" (no mic), "off", "live", or "hush" (muted by the howl guard)."""
+        if self.mic_live:
+            return "hush" if self.hush > 0 else "live"
+        return "off" if self.inputs else "none"
+
+    def _mic_index(self):
+        """The picked mic if it is plugged in, else Windows' default; -1 for none."""
+        return next((i for i, n in self.inputs if n == self.mic_pin), self.default_in)
+
+    def _open_mic(self):
+        """Open the mic's stream the way mic_echo.py does (WASAPI, small blocks). Caller holds mic_lock."""
+        dev = self._mic_index()
+        if dev < 0:
+            raise LookupError("no microphone")
+        if self.ring is None:   # 1 s of delay, plus room for the two streams' blocks to wobble
+            self.ring = Ring(int(SR * MAX_DELAY) + SR // 4, prime=SR // 100, slack=SR * 3 // 100,
+                             delay=SR * self.mic_delay)
+        self.ring.clear()
+        self.hot = self.hush = 0
+        self.mic_stream = sd.InputStream(device=dev, samplerate=SR, channels=1, dtype="float32", latency="low",
+                                         callback=self._listen, extra_settings=sd.WasapiSettings(auto_convert=True))
+        self.mic_stream.start()
+
+    def _close_mic(self):
+        """Caller holds mic_lock."""
+        if self.mic_stream is not None:
+            try:
+                self.mic_stream.close()
+            except Exception:
+                pass
+            self.mic_stream = None
+        self.mic_level, self.hot, self.hush = 0.0, 0, 0
+
+    def _listen(self, indata, frames, when, status):
+        x = np.clip(np.nan_to_num(indata[:, 0], nan=0.0, posinf=0.0, neginf=0.0), -1.0, 1.0)   # hard limit on the way in
+        self.ring.write(x)
+        self.mic_level = float(np.sqrt(np.mean(x ** 2))) if len(x) else 0.0   # the page's meter while ON AIR
 
     def choose(self, index):
         """The page's pick: an index from the list it was shown, or None for Windows' default (followed again).
@@ -536,11 +752,12 @@ class Mixer:
                 pass
 
     def _default_moved(self):
-        """Windows' default speaker is not the one it was when the stream opened (only matters while following)."""
-        if self.pin:
-            return False
-        now = self.default_id()
-        return now is not None and now != self.seen_default
+        """Windows' default speaker or mic is not the one it was at the last scan (only matters while following:
+        a new default mic needs a re-scan to be opened, and a first mic plugged in shows up the same way)."""
+        def moved(now, seen):
+            return now is not None and now != seen
+        return ((not self.pin and moved(self.default_id(), self.seen_default))
+                or (not self.mic_pin and moved(self.mic_default_id(), self.seen_mic_default)))
 
     def _mix(self, outdata, frames, when, status):
         mix = np.zeros(frames, dtype=np.float32)
@@ -552,32 +769,59 @@ class Mixer:
                 if pos + frames < len(snd):
                     still.append((snd, pos + frames))
             self.voices = still
+        voice = None
+        if self.mic_live:
+            voice = self.ring.read(frames)
+            if self.hush > 0:   # muted by the howl guard: the voice is dropped
+                self.hush, voice = self.hush - frames, None
+            else:
+                mix += voice * self.mic_gain
         out = limit(mix * self.volume)
+        if voice is not None:
+            self._guard(voice, out)
         self.level = float(np.sqrt(np.mean(out ** 2)))   # drives the page's LED meter
         outdata[:] = out[:, None]
 
-    def play(self, snd):
+    def _guard(self, voice, out):
+        """The howl guard. Feedback (or a shout right into the mic) pins the mic at full scale, or pins the speaker
+        at the limiter's ceiling with the mic loud too. Pinned for HOWL_SECONDS on end: the mic is muted for
+        HUSH_SECONDS and the page says "too loud, move the mic"."""
+        mic = float(np.max(np.abs(voice))) if len(voice) else 0.0
+        pinned = mic >= MIC_FULL or (mic >= MIC_LOUD and float(np.max(np.abs(out))) >= CEILING)
+        self.hot = self.hot + len(voice) if pinned else 0
+        if self.hot >= HOWL_SECONDS * SR:
+            self.hot, self.hush = 0, int(HUSH_SECONDS * SR)
+            self.ring.clear()   # the howl waiting in the delay goes too
+
+    def _ready(self):
+        """Open the speaker if it is not open; False when there is none."""
         if self.stream is None or not self.stream.active:   # a live stream needs no lock (record() may hold it)
             with self.open_lock:   # button presses arrive on several server threads at once
                 if self.stream is None or not self.stream.active:
                     try:
                         self._open()
                     except Exception:
-                        return     # no speaker: drop the sound rather than queue a pile-up that all plays later
+                        return False
+        return True
+
+    def play(self, snd):
+        if not self._ready():
+            return     # no speaker: drop the sound rather than queue a pile-up that all plays later
         with self.lock:
             self.voices.append((snd, 0))
 
     def record(self, seconds):
-        """Mono float32 samples from the default microphone; None when there is none. record(0) only checks."""
+        """Mono float32 samples from the microphone (the one picked on the page, else Windows' default); None when
+        there is none. record(0) only checks."""
         with self.open_lock:   # held throughout: a device re-scan in _open() would pull the mic from under the read
-            try:
-                mic = find("", "input", api_index("Windows WASAPI"))
-            except LookupError:
+            if self._mic_index() < 0:
                 try:
                     self._open()   # re-scan once: a mic plugged in after start is unknown until then
-                    mic = find("", "input", api_index("Windows WASAPI"))
                 except Exception:
-                    return None
+                    pass
+            mic = self._mic_index()
+            if mic < 0:
+                return None
             if seconds <= 0:
                 return np.zeros(0, np.float32)
             try:
@@ -595,6 +839,9 @@ class Mixer:
     def close(self):
         with self.open_lock:   # not halfway through watch() swapping streams
             self.closed = True
+            with self.mic_lock:
+                self.mic_live = False
+                self._close_mic()
             if self.stream is not None:
                 self.stream.close()
                 self.stream = None
@@ -697,11 +944,17 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
                     state["pc_poll"] = state["last_poll"]
                 self._send(200, json.dumps({"level": mixer.level, "speaker": mixer.label(),
                                             "volume": round(mixer.volume * 100),
-                                            "msg": list(radio._message)}).encode(), "application/json")
+                                            "msg": list(radio._message), "mic": mixer.mic_state(),
+                                            "micLevel": round(mixer.mic_level, 4),
+                                            "delay": round(mixer.mic_delay * 1000)}).encode(), "application/json")
             elif path == "/speakers":   # token: listing re-scans the devices, so only the page may ask
                 if parse_qs(u.query).get("t", [""])[0] != token:
                     return self._send(403)
                 self._send(200, json.dumps(mixer.speakers()).encode(), "application/json")
+            elif path == "/mics":   # the same for the mics
+                if parse_qs(u.query).get("t", [""])[0] != token:
+                    return self._send(403)
+                self._send(200, json.dumps(mixer.mics()).encode(), "application/json")
             else:
                 self._send(404)
 
@@ -721,6 +974,15 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
                     mixer.volume = max(0.0, min(float(arg), 150.0)) / 100
                 elif what == "speaker":
                     mixer.choose(None if arg == "default" else int(arg))
+                elif what == "mic":
+                    mixer.choose_mic(None if arg == "default" else int(arg))
+                elif what == "micgain":
+                    mixer.mic_gain = max(0.0, min(float(arg), 100.0)) / 100
+                elif what == "micdelay":
+                    mixer.set_delay(float(arg))
+                elif what == "onair" and arg in ("on", "off"):
+                    if not mixer.onair(arg == "on"):
+                        return self._send(409)          # no mic: the pad says so and nothing happens
                 elif what == "bye":
                     if self._from_pc():                 # a phone closing its tab does not stop the radio
                         state["bye_at"] = time.monotonic()
@@ -801,6 +1063,8 @@ def main():
                 break                               # the PC's window closed (a reload polls again within 3 s)
             if last and now - last > 150:
                 break                               # every page gone without saying bye (minimized pages poll slowly)
+            if mixer.mic_live and last and now - last > 10:
+                mixer.onair(False)                  # live, and no page left that could turn it off
             if last is None and now - started > (300 if a.share else 90):
                 break                               # page never opened (a phone needs longer to type the address)
     except KeyboardInterrupt:
@@ -878,6 +1142,10 @@ body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: cen
 #spk { min-width: 0; font: 700 max(12px, 1.2rem) Consolas, monospace; color: #4fd179; letter-spacing: .1em;
   text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chev { flex: none; color: #4fd179; font-size: max(12px, 1.2rem); line-height: 1; }
+/* ON AIR: the display turns red and shows how long the mic is held back. */
+.lcd.onair #now { color: #ff6b5e; text-shadow: 0 0 .9rem rgba(255, 107, 94, .85); }
+.dly { flex: none; font: 700 max(12px, 1.3rem) Consolas, monospace; color: #ff8a80; letter-spacing: .1em;
+  white-space: nowrap; }
 .meter { display: flex; gap: .45rem; flex: none; }
 .meter i { width: .95rem; height: 3.4rem; border-radius: .2rem; background: #163020; }
 .meter i:nth-child(n+11) { background: #35300f; }
@@ -954,7 +1222,14 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
 .extras { grid-area: extras; display: flex; gap: 1.6rem; margin: 2.6rem 0 0 3rem; }
 .extras:empty { display: none; }
 .extras .well { width: 12rem; height: 10.5rem; aspect-ratio: auto; }
-.grille { grid-area: grille; width: 17rem; height: 9.5rem; margin: 2.6rem 0 0 3rem; border-radius: 1.4rem;
+.extras .micwell { width: 15rem; }
+/* The MIC pad: its own colour; live, it is a red ON AIR light. A finger holds it, so no scrolling from it. */
+.mic { touch-action: none; }
+.well.onair { box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.6), 0 0 3rem .6rem #ff3b30, 0 .1rem 0 rgba(255,255,255,.08);
+  animation: onair 1.6s ease-in-out infinite; }
+@keyframes onair { 50% { box-shadow: inset 0 .6rem 1rem rgba(0,0,0,.6), 0 0 1.6rem .2rem #ff3b30, 0 .1rem 0 rgba(255,255,255,.08); } }
+.pad[aria-disabled="true"] { filter: grayscale(1) brightness(.7); cursor: default; }
+.grille { grid-area: grille; width: 12rem; height: 9.5rem; margin: 2.6rem 0 0 3rem; border-radius: 1.4rem;
   background: radial-gradient(circle, #050506 40%, transparent 46%) 0 0 / 1.2rem 1.2rem, linear-gradient(#2c2f36, #24272d);
   box-shadow: inset 0 .3rem .6rem rgba(0,0,0,.8), 0 .1rem 0 rgba(255,255,255,.1); }
 
@@ -991,6 +1266,17 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
 .row[aria-checked="true"] .tick { visibility: visible; }
 .note { margin: 0; padding: 14px 20px; color: #a3aab4; font-size: 15px; }
 .note.warn { color: #ffd84d; }
+.group { margin: 0; padding: 16px 20px 4px; color: #a3aab4; font-size: 13px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; }
+.knob { padding: 8px 20px 4px; }
+.knob .klab { display: flex; justify-content: space-between; font-size: 17px; font-weight: 600; }
+.knob output { color: #62ff8f; font-family: Consolas, monospace; }
+.sheet input[type=range] { height: 48px; }
+.sheet input[type=range]::-webkit-slider-runnable-track { height: 8px; border-radius: 4px; }
+.sheet input[type=range]::-webkit-slider-thumb { width: 32px; height: 32px; margin-top: -12px; border-radius: 50%;
+  background: #eef0f3; box-shadow: 0 2px 6px rgba(0, 0, 0, .6); }
+.sheet input[type=range]::-moz-range-track { height: 8px; border-radius: 4px; }
+.sheet input[type=range]::-moz-range-thumb { width: 32px; height: 32px; border-radius: 50%; background: #eef0f3; }
 
 /* Flow layout: phones, portrait tablets and short windows. */
 @media (max-width: 899.98px), (max-height: 599.98px) {
@@ -1024,6 +1310,7 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   .extras { display: grid; justify-content: center;   /* fixed-width tracks: a short last row sits centred */
     grid-template-columns: repeat(auto-fit, calc((100% - (var(--cols) - 1) * 1rem) / var(--cols))); }
   .extras .well { width: auto; height: auto; aspect-ratio: 1.1; }
+  .extras .micwell { grid-column: span 2; aspect-ratio: 2.25; }
   .well { border-radius: 1.6rem; padding: .5rem; }
   .pad { border-radius: 1.3rem; transform: translateY(-.7rem);
     box-shadow: 0 .7rem 0 var(--e), 0 1rem .9rem rgba(0,0,0,.55),
@@ -1048,6 +1335,7 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   html { font-size: clamp(9px, 2.6vh, 12px); }
   .well { aspect-ratio: 1.45; }
   .extras .well { aspect-ratio: 1.45; }
+  .extras .micwell { aspect-ratio: 2.95; }
   .top { flex-wrap: nowrap; }
   .brand small { display: none; }
   .lcd { min-height: 5rem; }
@@ -1063,7 +1351,7 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
 }
 @media (prefers-reduced-motion: reduce) {
   .pad, .pad.down, .stop, .stop.down, .emo, .well { transition: none; }
-  .sheet[open], .sheet.closing { animation: none; }
+  .sheet[open], .sheet.closing, .well.onair { animation: none; }
   .well.lit .emo { transform: none; }
 }
 @media (prefers-reduced-transparency: reduce) {
@@ -1077,7 +1365,8 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   <header class="top">
     <h1 class="brand">JAMES' <br><b>RADIO</b><small>MAKE SOME NOISE</small></h1>
     <div class="lcd"><div id="now" role="status" aria-live="polite">PRESS A BUTTON &#9733;</div>
-      <button class="right" id="spkbtn" type="button" aria-haspopup="dialog" aria-label="Choose the speaker">
+      <span class="dly" id="dly" hidden></span>
+      <button class="right" id="spkbtn" type="button" aria-haspopup="dialog" aria-label="Choose the speaker and mic">
         <span class="spkline"><span id="spk"></span><span class="chev" aria-hidden="true">&#9662;</span></span>
         <span class="meter" id="meter" aria-hidden="true"></span></button></div>
   </header>
@@ -1095,20 +1384,32 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
 </main>
 <dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
   <div class="sheet-in">
-    <div class="sheet-head"><h2 id="sheet-title">Play the radio on</h2><button class="done" id="done" type="button">Done</button></div>
-    <div class="list" id="spklist" role="radiogroup" aria-labelledby="sheet-title"></div>
+    <div class="sheet-head"><h2 id="sheet-title">Speaker and mic</h2><button class="done" id="done" type="button">Done</button></div>
+    <div class="list">
+      <h3 class="group" id="spk-title">Play the radio on</h3>
+      <div id="spklist" role="radiogroup" aria-labelledby="spk-title"></div>
+      <h3 class="group" id="mic-title">Microphone</h3>
+      <div id="miclist" role="radiogroup" aria-labelledby="mic-title"></div>
+      <div id="knobs" hidden>
+        <div class="knob"><div class="klab"><label for="gain">Mic loudness</label><output id="gainout" for="gain">30%</output></div>
+          <input id="gain" type="range" min="0" max="100" step="5" value="30"></div>
+        <div class="knob"><div class="klab"><label for="delay">Delay</label><output id="delayout" for="delay">350 ms</output></div>
+          <input id="delay" type="range" min="0" max="1000" step="50" value="350"></div>
+      </div>
+    </div>
   </div>
 </dialog>
 <script>
 const SOUNDS = __CONFIG__, EXTRAS = __EXTRAS__, TOKEN = "__TOKEN__";
 const post = (path) => fetch(`${path}?t=${TOKEN}`, { method: "POST" }).catch(() => {});
 const $ = (id) => document.getElementById(id);
-const now = $("now");
-let idle;
+const now = $("now"), IDLE = "PRESS A BUTTON \u2605", ONAIR = "\u25CF ON AIR";
+let idle, live = false;
+const rest = () => (now.textContent = live ? ONAIR : IDLE);
 function show(text) {
   now.textContent = text;
   clearTimeout(idle);
-  idle = setTimeout(() => (now.textContent = "PRESS A BUTTON ★"), 2500);
+  idle = setTimeout(rest, 2500);
 }
 function span(cls, text) {
   const s = document.createElement("span");
@@ -1152,7 +1453,7 @@ function makePad(parent, p, act) {
   if (p.emoji) b.append(span("emo", p.emoji));
   b.append(span("lbl", p.name));
   b.querySelectorAll(".key, .emo").forEach((s) => s.setAttribute("aria-hidden", "true"));
-  pressable(b, act);
+  if (act) pressable(b, act);
   well.append(b);
   parent.append(well);
   return { well, b };
@@ -1171,6 +1472,58 @@ function fire(i) {
   lit[i] = setTimeout(() => s.well.classList.remove("lit"), s.dur * 1000);
   show(`${s.emoji} ${s.name}`);
 }
+
+// The MIC pad: the PC's microphone, out of the radio's own speaker, held back by the sheet's delay so you hear
+// yourself a moment later. A finger holds it live and letting go turns it off; a mouse click, Enter or M turns it
+// on and off. Any page can press it, and every page shows it: the state comes back from the PC with each poll.
+const MIC = { c: "#4fe3cf", d: "#109c88", e: "#06584d", t: "#05302a" }, AIR = { c: "#ff7a6b", d: "#d8261f", e: "#7d0b0b", t: "#fff" };
+const mic = makePad($("extras"), { key: "m", emoji: "\u{1F399}\uFE0F", name: "MIC", ...MIC }, null);
+mic.well.classList.add("micwell");
+mic.b.classList.add("mic");
+const lcd = document.querySelector(".lcd"), dly = $("dly");
+let micState = "off", micMine = false, micHeld = null, micTold = 0, touchUp = 0, delayMs = 350;
+function paintMic() {
+  const on = micState === "live" || micState === "hush", none = micState === "none";
+  for (const [k, v] of Object.entries(on ? AIR : MIC)) mic.b.style.setProperty(`--${k}`, v);
+  mic.well.classList.toggle("onair", on);
+  mic.b.querySelector(".lbl").textContent = none ? "NO MIC" : on ? "ON AIR" : "MIC";
+  mic.b.setAttribute("aria-pressed", String(on));
+  mic.b.setAttribute("aria-disabled", String(none));
+  lcd.classList.toggle("onair", on);
+  dly.hidden = !on;
+  dly.textContent = delayMs ? `DELAY ${delayMs} MS` : "NO DELAY";
+  if (on !== live) { live = on; clearTimeout(idle); rest(); }
+}
+function setMic(on) {
+  if (micState === "none" || on === live) return;
+  micState = on ? "live" : "off";
+  micMine = on;
+  micTold = performance.now();
+  post(`/onair/${on ? "on" : "off"}`);
+  paintMic();
+}
+mic.b.addEventListener("pointerdown", (e) => {
+  if (e.button > 0 || micState === "none") return;
+  e.preventDefault();
+  mic.b.classList.add("down");
+  if (e.pointerType === "mouse") return;   // a mouse turns it on and off with the click below
+  micHeld = e.pointerId;
+  try { mic.b.setPointerCapture(e.pointerId); } catch (_) {}
+  setMic(true);
+});
+function letGo(e) {
+  if (micHeld !== e.pointerId) return;
+  micHeld = null;
+  touchUp = performance.now();
+  mic.b.classList.remove("down");
+  setMic(false);
+}
+for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) mic.b.addEventListener(t, letGo);
+mic.b.addEventListener("click", () => {
+  if (micHeld === null && performance.now() - touchUp > 700) setMic(!live);   // not the click a lifted finger sends
+});
+document.addEventListener("visibilitychange", () => { if (document.hidden && micMine && live) setMic(false); });
+paintMic();
 
 // Plugin buttons (plugins/*.py) are pads too. A label that starts with an emoji uses it as the picture.
 const PICTURE = /^(\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*️?)\s*/u;
@@ -1204,7 +1557,7 @@ function note(text, warn = false) {
   p.textContent = text;
   return p;
 }
-function choice(title, sub, checked, pick) {
+function choice(list, route, icon, title, sub, checked, pick) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "row";
@@ -1217,10 +1570,9 @@ function choice(title, sub, checked, pick) {
   tick.setAttribute("aria-hidden", "true");
   b.append(txt, tick);
   b.addEventListener("click", () => {
-    spklist.querySelectorAll(".row").forEach((r) => r.setAttribute("aria-checked", String(r === b)));
-    post(`/speaker/${pick}`);
-    show(`\u{1F50A} ${title}`);
-    setTimeout(closeSheet, 250);   // let the tick land before the sheet goes
+    list.querySelectorAll(".row").forEach((r) => r.setAttribute("aria-checked", String(r === b)));
+    post(`/${route}/${pick}`);
+    show(`${icon} ${title}`);
   });
   return b;
 }
@@ -1232,14 +1584,26 @@ async function openSheet() {
     sheet.style.setProperty("--right", `${Math.max(16, Math.round(innerWidth - r.right))}px`);
   }
   spklist.replaceChildren(note("Looking for speakers\u2026"));
+  miclist.replaceChildren();
+  knobs.hidden = true;
   sheet.showModal();
   try {
+    const SPK = "\u{1F50A}", MIK = "\u{1F399}\uFE0F";
     const r = await (await fetch(`/speakers?t=${TOKEN}`)).json();
-    const rows = [choice("Windows default", r.default ? `Now: ${r.default}` : "The speaker Windows uses", r.follow, "default"),
-      ...r.speakers.map((s) => choice(s.short, s.name !== s.short ? s.name : "", s.picked, s.index))];
+    const rows = [choice(spklist, "speaker", SPK, "Windows default", r.default ? `Now: ${r.default}` : "The speaker Windows uses", r.follow, "default"),
+      ...r.speakers.map((s) => choice(spklist, "speaker", SPK, s.short, s.name !== s.short ? s.name : "", s.picked, s.index))];
     spklist.replaceChildren(...rows);
     if (r.missing) spklist.append(note(`${r.pinned} is not on right now. The radio plays on Windows default until it is back.`, true));
     (spklist.querySelector('[aria-checked="true"]') || rows[0]).focus({ preventScroll: true });
+    const m = await (await fetch(`/mics?t=${TOKEN}`)).json();
+    if (!m.mics.length) return miclist.replaceChildren(note("No microphone found. Plug one in, then open this again.", true));
+    miclist.replaceChildren(choice(miclist, "mic", MIK, "Windows default", m.default ? `Now: ${m.default}` : "The mic Windows uses", m.follow, "default"),
+      ...m.mics.map((s) => choice(miclist, "mic", MIK, s.short, s.name !== s.short ? s.name : "", s.picked, s.index)));
+    if (m.missing) miclist.append(note(`${m.pinned} is not plugged in. The radio uses Windows default until it is back.`, true));
+    gain.value = m.gain;
+    delayIn.value = m.delay;
+    paintKnobs();
+    knobs.hidden = false;
   } catch (e) {
     spklist.replaceChildren(note("Can't reach the radio. Is it still open on the PC?", true));
   }
@@ -1253,6 +1617,18 @@ function closeSheet() {
   setTimeout(done, 400);
 }
 spkbtn.addEventListener("click", openSheet);
+const miclist = $("miclist"), knobs = $("knobs"), gain = $("gain"), delayIn = $("delay");
+function paintKnobs() {
+  $("gainout").textContent = `${gain.value}%`;
+  $("delayout").textContent = `${delayIn.value} ms`;
+}
+gain.addEventListener("input", () => { paintKnobs(); post(`/micgain/${gain.value}`); });
+delayIn.addEventListener("input", () => {
+  paintKnobs();
+  post(`/micdelay/${delayIn.value}`);
+  delayMs = +delayIn.value;
+  paintMic();
+});
 $("done").addEventListener("click", closeSheet);
 sheet.addEventListener("cancel", (e) => { e.preventDefault(); closeSheet(); });   // Esc
 sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); });   // a tap outside the sheet
@@ -1261,6 +1637,7 @@ addEventListener("keydown", (e) => {
   if (sheet.open || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;   // keys belong to the sheet while it is up
   const k = e.key.toLowerCase();
   if (k === " " || k === "escape") { e.preventDefault(); stop.classList.add("down"); stopAll(); return; }
+  if (k === "m" && e.target !== vol) { mic.b.classList.add("down"); setMic(!live); return; }
   if (k in byKey && e.target !== vol) { SOUNDS[byKey[k]].b.classList.add("down"); fire(byKey[k]); }
 });
 addEventListener("keyup", (e) => {
@@ -1268,6 +1645,7 @@ addEventListener("keyup", (e) => {
   const k = e.key.toLowerCase();
   if (k in byKey) SOUNDS[byKey[k]].b.classList.remove("down");
   if (k === " " || k === "escape") stop.classList.remove("down");
+  if (k === "m") mic.b.classList.remove("down");
 });
 
 const vol = $("vol"), volout = $("volout");
@@ -1282,22 +1660,33 @@ const segs = Array.from({ length: 16 }, () => meter.appendChild(document.createE
 let shown = 0, synced = false, seen = -1, speakerShown = "";
 async function poll() {
   try {
-    const { level, speaker, volume, msg } = await (await fetch("/level")).json();
+    const { level, speaker, volume, msg, mic: m, micLevel, delay } = await (await fetch("/level")).json();
     if (!synced) { vol.value = volume; volout.textContent = `${volume}%`; synced = true; }   // a reload keeps the app's volume
     if (seen >= 0 && msg[0] !== seen) show(msg[1]);   // a plugin button's reply, e.g. "No microphone"
     seen = msg[0];
     if (speaker !== speakerShown) {   // already short; the sheet has the full names
       speakerShown = speaker;
       spk.textContent = "\u{1F50A} " + speaker;
-      spkbtn.setAttribute("aria-label", `Speaker: ${speaker}. Choose another speaker`);
+      spkbtn.setAttribute("aria-label", `Speaker: ${speaker}. Choose the speaker and mic`);
     }
-    shown = Math.max(Math.round(Math.min(1, Math.sqrt(level) * 1.6) * segs.length), shown - 1);
+    if (delay !== delayMs) { delayMs = delay; paintMic(); }
+    if (m !== micState && performance.now() - micTold > 600) {   // a fresh press wins over a poll already on its way
+      if (m === "hush" && micState === "live") show("TOO LOUD, MOVE THE MIC");
+      micState = m;
+      if (m !== "live" && m !== "hush") micMine = false;
+      paintMic();
+    }
+    const lv = live ? micLevel : level;   // ON AIR: the meter is the mic's
+    shown = Math.max(Math.round(Math.min(1, Math.sqrt(lv) * 1.6) * segs.length), shown - 1);
     segs.forEach((g, k) => g.classList.toggle("on", k < shown));
   } catch (e) {}
   setTimeout(poll, 80);
 }
 poll();
-addEventListener("pagehide", () => navigator.sendBeacon(`/bye?t=${TOKEN}`));
+addEventListener("pagehide", () => {
+  if (micMine && live) navigator.sendBeacon(`/onair/off?t=${TOKEN}`);   // a page that goes takes its mic with it
+  navigator.sendBeacon(`/bye?t=${TOKEN}`);
+});
 </script>
 </body></html>
 """
