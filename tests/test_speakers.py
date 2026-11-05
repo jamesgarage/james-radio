@@ -1,17 +1,25 @@
-"""Speaker tests: following Windows' default speaker, with a fake sounddevice (no real audio is ever opened).
+"""Speaker tests: following Windows' default speaker, short names for the display, and the page's speaker picker
+(GET /speakers, POST /speaker/<index|default>), with a fake sounddevice: no real audio device is ever opened.
 
 Standard library only:  py -3 -m unittest discover -s tests
 radio.py imports numpy at the top for its synthesizer; when numpy is not installed, a stand-in with the one thing
 the import needs is used. Nothing tested here makes a sound.
 """
 import importlib
+import json
+import re
 import sys
+import threading
 import types
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+import plugins  # noqa: E402
 
 
 class FakeStream:
@@ -184,6 +192,110 @@ class ShortNames(unittest.TestCase):
         w.set_default(1)
         w.mixer._tick()
         self.assertEqual(w.mixer.label(), "Speakers (SoundWire)")
+
+
+class PickerRoutes(unittest.TestCase):
+    """GET /speakers and POST /speaker/<index|default> on the real server, over a real local socket."""
+
+    def setUp(self):
+        self.w = World(names=THIS_PC, default=2)
+        api = plugins.Radio(["Ding!"], lambda s: None, lambda f, s: None, lambda s: None, log=lambda line: None)
+        self.server, self.url, _ = radio.make_server(self.w.mixer, [("Ding!", "x", [0.0] * 480)], api)
+        threading.Thread(target=self.server.serve_forever, args=(0.05,), daemon=True).start()
+        self.token = re.search(r'TOKEN = "([^"]+)"', self.call("")[1]).group(1)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def call(self, path, post=False, host=None, token=None):
+        if token:
+            path += f"?t={token}"
+        req = urllib.request.Request(self.url + path, method="POST" if post else "GET", data=b"" if post else None)
+        if host:
+            req.add_header("Host", host)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            e.close()
+            return e.code, ""
+
+    def listing(self):
+        status, body = self.call("speakers", token=self.token)
+        self.assertEqual(status, 200)
+        return json.loads(body)
+
+    def index_of(self, listing, name):
+        return next(s["index"] for s in listing["speakers"] if s["name"] == name)
+
+    def pick(self, what):
+        return self.call(f"speaker/{what}", post=True, token=self.token)[0]
+
+    def test_the_list_answers_only_the_page(self):
+        self.assertEqual(self.call("speakers")[0], 403)
+        self.assertEqual(self.call("speakers", token="guess")[0], 403)
+        self.assertEqual(self.call("speakers", token=self.token, host="evil.example")[0], 403)
+
+    def test_the_list_has_every_speaker_with_short_and_full_names(self):
+        r = self.listing()
+        self.assertEqual([s["name"] for s in r["speakers"]], THIS_PC)   # WASAPI only: the MME copy is not there
+        self.assertEqual([s["short"] for s in r["speakers"]],
+                         ["Monitor -2", "Speakers (SoundWire)", "Airpod Max", "Speakers (USB)"])
+        self.assertEqual((r["follow"], r["default"], r["missing"]), (True, "Airpod Max", False))
+        self.assertFalse(any(s["picked"] for s in r["speakers"]))
+
+    def test_a_pick_moves_the_sound_and_holds_when_windows_changes(self):
+        usb = self.index_of(self.listing(), THIS_PC[3])
+        self.assertEqual(self.pick(usb), 204)
+        self.assertEqual(self.w.playing(), THIS_PC[3])
+        self.assertEqual(json.loads(self.call("level")[1])["speaker"], "Speakers (USB)")
+        r = self.listing()
+        self.assertFalse(r["follow"])
+        self.assertEqual([s["short"] for s in r["speakers"] if s["picked"]], ["Speakers (USB)"])
+        self.w.set_default(1)
+        self.w.mixer._tick()
+        self.assertEqual(self.w.playing(), THIS_PC[3])
+
+    def test_windows_default_is_followed_again(self):
+        self.pick(self.index_of(self.listing(), THIS_PC[3]))
+        self.assertEqual(self.pick("default"), 204)
+        self.assertEqual(self.w.playing(), THIS_PC[2])
+        self.assertTrue(self.listing()["follow"])
+        self.w.set_default(1)
+        self.w.mixer._tick()
+        self.assertEqual(self.w.playing(), THIS_PC[1])
+
+    def test_a_pick_waits_for_the_sound_playing(self):
+        usb = self.index_of(self.listing(), THIS_PC[3])
+        self.w.mixer.voices.append(([0.0] * 10, 0))
+        self.assertEqual(self.pick(usb), 204)
+        self.assertEqual(self.w.playing(), THIS_PC[2])
+        self.w.mixer.voices.clear()
+        self.w.mixer._tick()
+        self.assertEqual(self.w.playing(), THIS_PC[3])
+
+    def test_a_picked_speaker_that_goes_away_is_waited_for(self):
+        self.pick(self.index_of(self.listing(), THIS_PC[3]))
+        SD.devices.pop()                       # switched off
+        self.w.mixer.stream.active = False     # its stream dies with it
+        self.w.mixer._tick()
+        self.assertEqual(self.w.playing(), THIS_PC[2])
+        r = self.listing()
+        self.assertEqual((r["missing"], r["pinned"]), (True, "Speakers (USB)"))
+        SD.add(THIS_PC[3])                     # back on
+        self.w.mixer._tick()
+        self.assertEqual(self.w.playing(), THIS_PC[3])
+
+    def test_bad_picks_change_nothing(self):
+        self.assertEqual(self.pick(1), 404)    # a pick must come from a list the page was shown
+        self.listing()
+        self.assertEqual(self.pick(99), 404)
+        self.assertEqual(self.pick("loud"), 400)
+        self.assertEqual(self.call("speaker/1", post=True)[0], 403)
+        self.assertEqual(self.call("speaker/1", post=True, token=self.token, host="evil.example")[0], 403)
+        self.assertEqual(self.w.playing(), THIS_PC[2])
+        self.assertTrue(self.listing()["follow"])
 
 
 if __name__ == "__main__":

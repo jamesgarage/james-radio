@@ -430,8 +430,9 @@ def windows_default_speaker():
 class Mixer:
     """One output stream; overlapping sounds are summed in the callback.
 
-    Which speaker: the one named with --out, else Windows' default, followed when it changes (between sounds).
-    A named speaker that is away is waited for on Windows' default."""
+    Which speaker: the one picked on the page, else the one named with --out, else Windows' default, followed
+    when it changes. Changes wait for the sounds playing to end. A picked or named speaker that is away is waited
+    for on Windows' default."""
 
     def __init__(self, out_part, default_id=windows_default_speaker):
         self.voices, self.lock, self.volume, self.stream = [], threading.Lock(), 1.0, None
@@ -440,6 +441,8 @@ class Mixer:
         self.pin, self.pin_exact = out_part or None, False   # stay on this speaker (part of its name); None: follow
         self.default_id, self.seen_default = default_id, None   # Windows' default speaker when the stream opened
         self.outputs = []   # (index, name) of every WASAPI output at the last scan
+        self.listed, self.default_name = [], ""   # the outputs as the page's picker last showed them; the default's name
+        self.switch = False   # a speaker was picked while sounds played: change over when they end
 
     def label(self):
         """The speaker's short name, for the display."""
@@ -455,15 +458,17 @@ class Mixer:
         if self.stream is not None:
             self.stream.close()
             self.stream = None
-        self.device = "No speaker"   # what the page shows until a stream opens
+        self.device, self.switch = "No speaker", False   # what the page shows until a stream opens
         self.seen_default = self.default_id()   # before the scan: a change after this is caught on the next look
         sd._terminate()              # re-scan devices: PortAudio only knows the list from when it started
         sd._initialize()
         api = next(i for i, a in enumerate(sd.query_hostapis()) if a["name"] == "Windows WASAPI")
         self.outputs = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
                         if d["hostapi"] == api and d["max_output_channels"] > 0]
+        default = sd.query_hostapis(api)["default_output_device"]
+        self.default_name = dict(self.outputs).get(default, "")
         wanted = [i for i, name in self.outputs if self._pinned(name)]
-        dev = wanted[0] if wanted else sd.query_hostapis(api)["default_output_device"]
+        dev = wanted[0] if wanted else default
         if dev < 0:
             raise LookupError("Windows has no output device")
         self.fallback = bool(self.pin) and not wanted
@@ -488,12 +493,47 @@ class Mixer:
             if self.closed:
                 return False
             dead = self.stream is None or not self.stream.active
-            if dead or (not self.voices and (self.fallback or self._default_moved())):   # never cut a sound short
+            if dead or (not self.voices and (self.fallback or self.switch or self._default_moved())):   # never cut a sound short
                 try:
                     self._open()
                 except Exception:
                     pass
             return True
+
+    def speakers(self):
+        """The page's speaker list. Re-scanned when nothing is playing, so a speaker switched on a moment ago is in
+        it (a re-scan reopens the stream, which is why it waits for silence)."""
+        with self.open_lock:
+            if not self.voices and not self.closed:
+                try:
+                    self._open()
+                except Exception:
+                    pass
+            self.listed = list(self.outputs)
+            names = [n for _, n in self.listed]
+            picked = next((i for i, n in self.listed if self._pinned(n)), None)
+            return {"follow": self.pin is None, "missing": bool(self.pin) and picked is None,
+                    "pinned": short_name(self.pin, names + [self.pin]) if self.pin else "",
+                    "default": short_name(self.default_name, names) if self.default_name else "",
+                    "speakers": [{"index": i, "name": n, "short": short_name(n, names), "picked": i == picked}
+                                 for i, n in self.listed]}
+
+    def choose(self, index):
+        """The page's pick: an index from the list it was shown, or None for Windows' default (followed again).
+        It holds for the rest of the run. With sounds playing, the change waits for them to end.
+        KeyError: not in that list."""
+        with self.open_lock:
+            if index is None:
+                self.pin, self.pin_exact = None, False
+            else:
+                self.pin, self.pin_exact = dict(self.listed)[index], True
+            if self.voices:
+                self.switch = True
+                return
+            try:
+                self._open()
+            except Exception:
+                pass
 
     def _default_moved(self):
         """Windows' default speaker is not the one it was when the stream opened (only matters while following)."""
@@ -636,7 +676,8 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
             self.wfile.write(body)
 
         def do_GET(self):
-            path = urlsplit(self.path).path
+            u = urlsplit(self.path)
+            path = u.path
             if path == "/":
                 self._send(200, page, "text/html; charset=utf-8")
             elif path == "/level":
@@ -646,6 +687,10 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
                 self._send(200, json.dumps({"level": mixer.level, "speaker": mixer.label(),
                                             "volume": round(mixer.volume * 100),
                                             "msg": list(radio._message)}).encode(), "application/json")
+            elif path == "/speakers":   # token: listing re-scans the devices, so only the page may ask
+                if parse_qs(u.query).get("t", [""])[0] != token:
+                    return self._send(403)
+                self._send(200, json.dumps(mixer.speakers()).encode(), "application/json")
             else:
                 self._send(404)
 
@@ -663,6 +708,8 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
                     mixer.stop_all()
                 elif what == "volume":
                     mixer.volume = max(0.0, min(float(arg), 150.0)) / 100
+                elif what == "speaker":
+                    mixer.choose(None if arg == "default" else int(arg))
                 elif what == "bye":
                     if self._from_pc():                 # a phone closing its tab does not stop the radio
                         state["bye_at"] = time.monotonic()
@@ -670,6 +717,8 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
                     return self._send(404)
             except ValueError:
                 return self._send(400)
+            except KeyError:
+                return self._send(404)
             self._send(204)
 
     try:
@@ -798,7 +847,7 @@ body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: cen
   -webkit-background-clip: text; background-clip: text; color: transparent; text-shadow: none;
   filter: drop-shadow(0 .15rem 0 #000); }
 .brand small { display: block; font-size: max(12px, 1.2rem); font-weight: 700; color: #a3aab4; letter-spacing: .3em; margin-top: .7rem; }
-.lcd { flex: 1; min-width: 0; height: 7.4rem; border-radius: 1.1rem; padding: 0 2.2rem; position: relative; overflow: hidden;
+.lcd { flex: 1; min-width: 0; height: max(7.4rem, calc(44px + 1rem)); border-radius: 1.1rem; padding: 0 2.2rem; position: relative; overflow: hidden;
   display: flex; align-items: center; justify-content: space-between; gap: 2rem;
   background: linear-gradient(180deg, #0a1d10, #10301b); border: .5rem solid #0b0c0e;
   box-shadow: inset 0 .5rem 1.2rem rgba(0,0,0,.9), 0 .12rem 0 rgba(255,255,255,.14); }
@@ -808,9 +857,16 @@ body { margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: cen
 #now { min-width: 0; font: 700 2.9rem Consolas, "Courier New", monospace; color: #62ff8f; letter-spacing: .12em;
   text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   text-shadow: 0 0 .9rem rgba(98,255,143,.85); }
-.right { display: flex; flex-direction: column; align-items: flex-end; gap: .5rem; flex: 0 1 auto; min-width: 0; max-width: 100%; }
-#spk { max-width: 100%; font: 700 max(12px, 1.2rem) Consolas, monospace; color: #4fd179; letter-spacing: .1em;
+/* The speaker line and meter are one button, the display's full height: a tap opens the speaker sheet. */
+.right { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: .5rem;
+  flex: 0 1 auto; min-width: 0; max-width: 100%; align-self: stretch; margin: 0 -1.2rem 0 0; padding: 0 1.2rem;
+  border: 0; border-radius: .8rem; background: none; color: inherit; font: inherit; cursor: pointer; }
+.right:active { background: rgba(98, 255, 143, .14); }
+.right:focus-visible { outline: .3rem solid #62ff8f; outline-offset: -.3rem; }
+.spkline { display: flex; align-items: center; gap: .6rem; min-width: 0; max-width: 100%; }
+#spk { min-width: 0; font: 700 max(12px, 1.2rem) Consolas, monospace; color: #4fd179; letter-spacing: .1em;
   text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chev { flex: none; color: #4fd179; font-size: max(12px, 1.2rem); line-height: 1; }
 .meter { display: flex; gap: .45rem; flex: none; }
 .meter i { width: .95rem; height: 3.4rem; border-radius: .2rem; background: #163020; }
 .meter i:nth-child(n+11) { background: #35300f; }
@@ -891,6 +947,40 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   background: radial-gradient(circle, #050506 40%, transparent 46%) 0 0 / 1.2rem 1.2rem, linear-gradient(#2c2f36, #24272d);
   box-shadow: inset 0 .3rem .6rem rgba(0,0,0,.8), 0 .1rem 0 rgba(255,255,255,.1); }
 
+/* Speaker sheet: a card that drops from the display on a big screen, a bottom sheet on a phone.
+   Real pixels, not toy units: it is read at arm's length on every screen. */
+.sheet { position: fixed; inset: var(--top, 12vh) var(--right, 16px) auto auto; margin: 0; padding: 0; border: 0;
+  width: 400px; max-width: calc(100vw - 32px); max-height: min(70vh, 560px); overflow: hidden; border-radius: 18px;
+  color: #eef0f3; background: #24272e; transform-origin: top right; user-select: none; -webkit-user-select: none;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .65), inset 0 1px 0 rgba(255, 255, 255, .12);
+  font: 16px/1.3 "Segoe UI", system-ui, -apple-system, sans-serif; }
+.sheet::backdrop { background: rgba(4, 5, 7, .55); }
+.sheet[open] { animation: sheet-drop .3s cubic-bezier(.2, .9, .3, 1.15) both; }
+.sheet.closing { animation: sheet-lift .18s ease-in both; }
+@keyframes sheet-drop { from { opacity: 0; transform: translateY(-8px) scale(.96); } }
+@keyframes sheet-lift { to { opacity: 0; transform: translateY(-8px) scale(.96); } }
+@keyframes sheet-rise { from { transform: translateY(100%); } }
+@keyframes sheet-sink { to { transform: translateY(100%); } }
+.sheet-in { display: flex; flex-direction: column; max-height: inherit; }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 4px 6px 4px 20px; border-bottom: 1px solid rgba(255, 255, 255, .09); }
+.sheet h2 { margin: 0; font-size: 17px; font-weight: 700; }
+.done { min-width: 64px; min-height: 44px; padding: 0 12px; border: 0; border-radius: 12px; background: none;
+  color: #62ff8f; font-family: inherit; font-size: 17px; font-weight: 600; cursor: pointer; }
+.done:focus-visible, .row:focus-visible { outline: 3px solid #62ff8f; outline-offset: -3px; }
+.list { overflow-y: auto; overscroll-behavior: contain; padding: 4px 0 calc(8px + env(safe-area-inset-bottom)); }
+.row { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 56px; margin: 0; padding: 8px 20px;
+  border: 0; background: none; color: inherit; font-family: inherit; text-align: left; cursor: pointer; }
+.row + .row { border-top: 1px solid rgba(255, 255, 255, .07); }
+.row:active { background: rgba(255, 255, 255, .08); }
+.row .txt { flex: 1; min-width: 0; }
+.row b { display: block; font-size: 17px; font-weight: 600; }
+.row small { display: block; margin-top: 2px; color: #a3aab4; font-size: 13px; overflow-wrap: anywhere; }
+.row .tick { flex: none; width: 24px; color: #62ff8f; font-size: 20px; font-weight: 800; text-align: center; visibility: hidden; }
+.row[aria-checked="true"] .tick { visibility: visible; }
+.note { margin: 0; padding: 14px 20px; color: #a3aab4; font-size: 15px; }
+.note.warn { color: #ffd84d; }
+
 /* Flow layout: phones, portrait tablets and short windows. */
 @media (max-width: 899.98px), (max-height: 599.98px) {
   html { font-size: clamp(10px, 2.8vw, 13px); }
@@ -907,9 +997,16 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   .lcd { flex: 1 1 26rem; height: auto; min-height: 6.2rem; flex-wrap: wrap; gap: .3rem 1.4rem;
     padding: .8rem 1.4rem; border-width: .4rem; }
   #now { flex: 1 1 auto; font-size: 2.2rem; }
-  .right { flex-direction: row; align-items: center; gap: 1rem; margin-left: auto; }
-  .meter { gap: .3rem; }
-  .meter i { width: .7rem; height: 2.4rem; }
+  /* The speaker line gets its own row in the display: the name first, the meter shrinks into what is left. */
+  .right { flex: 1 1 100%; flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem;
+    min-height: 44px; margin: -.4rem -.8rem; padding: .4rem .8rem; }
+  .spkline { flex: 0 0 auto; max-width: calc(100% - 7rem); }
+  .sheet { inset: auto 0 0 0; margin: 0 auto; width: 100%; max-width: 560px; max-height: 80vh;
+    border-radius: 20px 20px 0 0; transform-origin: bottom center; }
+  .sheet[open] { animation-name: sheet-rise; animation-duration: .34s; animation-timing-function: cubic-bezier(.2, .9, .3, 1); }
+  .sheet.closing { animation-name: sheet-sink; animation-duration: .22s; animation-timing-function: ease-in; }
+  .meter { flex: 1 1 0; min-width: 6rem; max-width: 15rem; gap: .25rem; justify-content: flex-end; }
+  .meter i { flex: 1 1 0; width: auto; max-width: .7rem; min-width: 2px; height: 2.4rem; }
   .pads, .extras { margin: 0; gap: 1rem; padding: 1.2rem; border-radius: 1.8rem; background: #111317;
     box-shadow: inset 0 .5rem 1.5rem rgba(0,0,0,.9), 0 .12rem 0 rgba(255,255,255,.12); }
   .pads { grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); }
@@ -943,15 +1040,19 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   .top { flex-wrap: nowrap; }
   .brand small { display: none; }
   .lcd { min-height: 5rem; }
+  .sheet { max-height: 94vh; }
+  .row { min-height: 48px; padding-block: 4px; }
 }
 
 /* Only where a mouse is: hover warmth and the keyboard hints. Nothing depends on hover. */
 @media (hover: hover) and (pointer: fine) {
   .pad:hover, .stop:hover { filter: brightness(1.08); }
+  .right:hover, .row:hover, .done:hover { background: rgba(255, 255, 255, .06); }
   .key { display: block; }
 }
 @media (prefers-reduced-motion: reduce) {
   .pad, .pad.down, .stop, .stop.down, .emo, .well { transition: none; }
+  .sheet[open], .sheet.closing { animation: none; }
   .well.lit .emo { transform: none; }
 }
 @media (prefers-reduced-transparency: reduce) {
@@ -965,7 +1066,9 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   <header class="top">
     <h1 class="brand">JAMES' <br><b>RADIO</b><small>MAKE SOME NOISE</small></h1>
     <div class="lcd"><div id="now" role="status" aria-live="polite">PRESS A BUTTON &#9733;</div>
-      <div class="right" aria-hidden="true"><div id="spk"></div><div class="meter" id="meter"></div></div></div>
+      <button class="right" id="spkbtn" type="button" aria-haspopup="dialog" aria-label="Choose the speaker">
+        <span class="spkline"><span id="spk"></span><span class="chev" aria-hidden="true">&#9662;</span></span>
+        <span class="meter" id="meter" aria-hidden="true"></span></button></div>
   </header>
   <section class="pads" id="pads" aria-label="Sounds"></section>
   <section class="extras" id="extras" aria-label="More buttons"></section>
@@ -979,6 +1082,12 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   </footer>
   <div class="grille" aria-hidden="true"></div>
 </main>
+<dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
+  <div class="sheet-in">
+    <div class="sheet-head"><h2 id="sheet-title">Play the radio on</h2><button class="done" id="done" type="button">Done</button></div>
+    <div class="list" id="spklist" role="radiogroup" aria-labelledby="sheet-title"></div>
+  </div>
+</dialog>
 <script>
 const SOUNDS = __CONFIG__, EXTRAS = __EXTRAS__, TOKEN = "__TOKEN__";
 const post = (path) => fetch(`${path}?t=${TOKEN}`, { method: "POST" }).catch(() => {});
@@ -1074,13 +1183,77 @@ addEventListener("pointerup", (e) => { if (e.pointerType === "mouse") release();
 addEventListener("blur", release);
 addEventListener("contextmenu", (e) => e.preventDefault());   // no long-press menu under small fingers
 
+// The speaker sheet: tap the speaker name under the display to choose where the sound plays.
+const sheet = $("sheet"), spklist = $("spklist"), spkbtn = $("spkbtn");
+const FLOW = matchMedia("(max-width: 899.98px), (max-height: 599.98px)");
+const STILL = matchMedia("(prefers-reduced-motion: reduce)");
+function note(text, warn = false) {
+  const p = document.createElement("p");
+  p.className = warn ? "note warn" : "note";
+  p.textContent = text;
+  return p;
+}
+function choice(title, sub, checked, pick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "row";
+  b.setAttribute("role", "radio");
+  b.setAttribute("aria-checked", String(checked));
+  const txt = span("txt", "");
+  txt.append(Object.assign(document.createElement("b"), { textContent: title }));
+  if (sub) txt.append(Object.assign(document.createElement("small"), { textContent: sub }));
+  const tick = span("tick", "\u2713");
+  tick.setAttribute("aria-hidden", "true");
+  b.append(txt, tick);
+  b.addEventListener("click", () => {
+    spklist.querySelectorAll(".row").forEach((r) => r.setAttribute("aria-checked", String(r === b)));
+    post(`/speaker/${pick}`);
+    show(`\u{1F50A} ${title}`);
+    setTimeout(closeSheet, 250);   // let the tick land before the sheet goes
+  });
+  return b;
+}
+async function openSheet() {
+  if (sheet.open) return;
+  if (!FLOW.matches) {   // the card hangs from the speaker line it came from
+    const r = spkbtn.getBoundingClientRect();
+    sheet.style.setProperty("--top", `${Math.round(r.bottom + 8)}px`);
+    sheet.style.setProperty("--right", `${Math.max(16, Math.round(innerWidth - r.right))}px`);
+  }
+  spklist.replaceChildren(note("Looking for speakers\u2026"));
+  sheet.showModal();
+  try {
+    const r = await (await fetch(`/speakers?t=${TOKEN}`)).json();
+    const rows = [choice("Windows default", r.default ? `Now: ${r.default}` : "The speaker Windows uses", r.follow, "default"),
+      ...r.speakers.map((s) => choice(s.short, s.name !== s.short ? s.name : "", s.picked, s.index))];
+    spklist.replaceChildren(...rows);
+    if (r.missing) spklist.append(note(`${r.pinned} is not on right now. The radio plays on Windows default until it is back.`, true));
+    (spklist.querySelector('[aria-checked="true"]') || rows[0]).focus({ preventScroll: true });
+  } catch (e) {
+    spklist.replaceChildren(note("Can't reach the radio. Is it still open on the PC?", true));
+  }
+}
+function closeSheet() {
+  if (!sheet.open || sheet.classList.contains("closing")) return;
+  const done = () => { if (sheet.open) sheet.close(); sheet.classList.remove("closing"); };
+  if (STILL.matches) return done();
+  sheet.classList.add("closing");   // leave the way it came in
+  sheet.addEventListener("animationend", done, { once: true });
+  setTimeout(done, 400);
+}
+spkbtn.addEventListener("click", openSheet);
+$("done").addEventListener("click", closeSheet);
+sheet.addEventListener("cancel", (e) => { e.preventDefault(); closeSheet(); });   // Esc
+sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); });   // a tap outside the sheet
+
 addEventListener("keydown", (e) => {
-  if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (sheet.open || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;   // keys belong to the sheet while it is up
   const k = e.key.toLowerCase();
   if (k === " " || k === "escape") { e.preventDefault(); stop.classList.add("down"); stopAll(); return; }
   if (k in byKey && e.target !== vol) { SOUNDS[byKey[k]].b.classList.add("down"); fire(byKey[k]); }
 });
 addEventListener("keyup", (e) => {
+  if (sheet.open) return;
   const k = e.key.toLowerCase();
   if (k in byKey) SOUNDS[byKey[k]].b.classList.remove("down");
   if (k === " " || k === "escape") stop.classList.remove("down");
@@ -1102,7 +1275,11 @@ async function poll() {
     if (!synced) { vol.value = volume; volout.textContent = `${volume}%`; synced = true; }   // a reload keeps the app's volume
     if (seen >= 0 && msg[0] !== seen) show(msg[1]);   // a plugin button's reply, e.g. "No microphone"
     seen = msg[0];
-    if (speaker !== speakerShown) { speakerShown = speaker; spk.textContent = "\u{1F50A} " + speaker; }   // already short
+    if (speaker !== speakerShown) {   // already short; the sheet has the full names
+      speakerShown = speaker;
+      spk.textContent = "\u{1F50A} " + speaker;
+      spkbtn.setAttribute("aria-label", `Speaker: ${speaker}. Choose another speaker`);
+    }
     shown = Math.max(Math.round(Math.min(1, Math.sqrt(level) * 1.6) * segs.length), shown - 1);
     segs.forEach((g, k) => g.classList.toggle("on", k < shown));
   } catch (e) {}

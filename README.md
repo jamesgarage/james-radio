@@ -49,6 +49,14 @@ Options:
 
 To find device names, list them with the microphone tool below: `uv run mic_echo.py --list`.
 
+## Choosing the speaker
+
+Tap the speaker name under the display to choose where the sound plays. A list of the PC's speakers opens, with
+Windows default first and the one in use ticked; the display shows a short name and the list shows each full
+one. A speaker picked there stays picked until the radio closes or you pick Windows default again. If it is
+switched off, the radio plays on the Windows default until it is back. A phone playing the radio (below) can
+choose too; the sound always comes out of the PC.
+
 ## Play from a phone or tablet
 
 Double-click `Play on Wi-Fi.cmd` (or run `uv run radio.py --share`). The radio opens on the PC as usual, and its
