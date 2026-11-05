@@ -16,6 +16,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -367,6 +368,20 @@ def plugin_radio(mixer, sounds):
     return plugins.Radio(by_name, play, tone, mixer.record)
 
 
+def short_name(name, names=()):
+    """A speaker's name for the little display: Windows' name for it without the bracketed part, at most 22
+    characters. When another speaker in `names` has the same first part, one telling word from the brackets stays:
+    "Airpod Max (Sam's AirPods Max)" -> "Airpod Max"; "Speakers (SoundWire Speakers)" -> "Speakers (SoundWire)"."""
+    base, _, detail = name.partition(" (")
+    base = base.strip() or name.strip()
+    if detail and sum(n.partition(" (")[0].strip() == base for n in names) > 1:
+        words = [w for w in re.sub(r"^\d+- |\((?:R|TM)\)|\)$", "", detail.strip()).split()
+                 if w.lower() not in base.lower().split()]
+        if words:
+            base = f"{base} ({words[0]})"
+    return base if len(base) <= 22 else base[:21].rstrip() + "…"
+
+
 def _com(obj, slot, *argtypes):
     """Method number `slot` (vtable order) of the COM object `obj`, called with the remaining arguments."""
     import ctypes
@@ -425,6 +440,10 @@ class Mixer:
         self.pin, self.pin_exact = out_part or None, False   # stay on this speaker (part of its name); None: follow
         self.default_id, self.seen_default = default_id, None   # Windows' default speaker when the stream opened
         self.outputs = []   # (index, name) of every WASAPI output at the last scan
+
+    def label(self):
+        """The speaker's short name, for the display."""
+        return short_name(self.device, [n for _, n in self.outputs])
 
     def _pinned(self, name):
         if not self.pin:
@@ -624,7 +643,7 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0):
                 state["last_poll"] = time.monotonic()   # the page's poll doubles as its heartbeat
                 if self._from_pc():
                     state["pc_poll"] = state["last_poll"]
-                self._send(200, json.dumps({"level": mixer.level, "speaker": mixer.device,
+                self._send(200, json.dumps({"level": mixer.level, "speaker": mixer.label(),
                                             "volume": round(mixer.volume * 100),
                                             "msg": list(radio._message)}).encode(), "application/json")
             else:
@@ -1076,14 +1095,14 @@ vol.addEventListener("input", () => {
 
 const meter = $("meter"), spk = $("spk");
 const segs = Array.from({ length: 16 }, () => meter.appendChild(document.createElement("i")));
-let shown = 0, synced = false, seen = -1;
+let shown = 0, synced = false, seen = -1, speakerShown = "";
 async function poll() {
   try {
     const { level, speaker, volume, msg } = await (await fetch("/level")).json();
     if (!synced) { vol.value = volume; volout.textContent = `${volume}%`; synced = true; }   // a reload keeps the app's volume
     if (seen >= 0 && msg[0] !== seen) show(msg[1]);   // a plugin button's reply, e.g. "No microphone"
     seen = msg[0];
-    spk.textContent = "\u{1F50A} " + ((speaker.match(/\(([^)]+)\)/) || [, speaker])[1]).replace(/^\d+- /, "");
+    if (speaker !== speakerShown) { speakerShown = speaker; spk.textContent = "\u{1F50A} " + speaker; }   // already short
     shown = Math.max(Math.round(Math.min(1, Math.sqrt(level) * 1.6) * segs.length), shown - 1);
     segs.forEach((g, k) => g.classList.toggle("on", k < shown));
   } catch (e) {}

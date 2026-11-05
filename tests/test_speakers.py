@@ -152,5 +152,39 @@ class FollowDefault(unittest.TestCase):
         self.assertFalse(w.mixer._tick())
 
 
+THIS_PC = ["Monitor -2 (2- HD Audio Driver for Display Audio)", "Speakers (SoundWire Speakers)",
+           "Airpod Max (Sam’s AirPods Max - Find My)", "Speakers (3- USB Advanced Audio Device)"]
+
+
+class ShortNames(unittest.TestCase):
+    def test_the_bracketed_part_goes(self):
+        self.assertEqual(radio.short_name(THIS_PC[2], THIS_PC), "Airpod Max")
+        self.assertEqual(radio.short_name(THIS_PC[0], THIS_PC), "Monitor -2")
+
+    def test_two_speakers_with_one_name_keep_a_telling_word(self):
+        self.assertEqual(radio.short_name(THIS_PC[1], THIS_PC), "Speakers (SoundWire)")
+        self.assertEqual(radio.short_name(THIS_PC[3], THIS_PC), "Speakers (USB)")
+        self.assertEqual(radio.short_name("Speakers (Realtek(R) Audio)", ["Speakers (Realtek(R) Audio)", THIS_PC[1]]),
+                         "Speakers (Realtek)")
+
+    def test_a_lone_speakers_needs_no_word(self):
+        self.assertEqual(radio.short_name(THIS_PC[1], THIS_PC[1:3]), "Speakers")
+
+    def test_at_most_22_characters(self):
+        name = "Living Room Sound Bar Left Channel (Bluetooth)"
+        short = radio.short_name(name, [name])
+        self.assertEqual(len(short), 22)
+        self.assertEqual(short, "Living Room Sound Bar…")
+        self.assertEqual(radio.short_name("Kitchen", ["Kitchen"]), "Kitchen")
+        self.assertEqual(radio.short_name("No speaker"), "No speaker")
+
+    def test_the_display_shows_the_short_name(self):
+        w = World(names=THIS_PC, default=2)
+        self.assertEqual(w.mixer.label(), "Airpod Max")
+        w.set_default(1)
+        w.mixer._tick()
+        self.assertEqual(w.mixer.label(), "Speakers (SoundWire)")
+
+
 if __name__ == "__main__":
     unittest.main()
