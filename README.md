@@ -1,9 +1,9 @@
 # James' Radio
 
-James' Radio is a toy soundboard for Windows: 24 synthesized sounds on big glowing pads, and a second page,
-STATION, of radio-show pads (below). Every sound is generated with numpy when the program starts, so there are no
-sound files; the station's voice is made once with Windows' own speech. The only downloads are the ones uv makes on
-the first run (Python and two libraries, see Requirements).
+James' Radio is a toy soundboard for Windows: 24 synthesized sounds on big glowing pads, a second page, STATION,
+of radio-show pads, and a third, PLAY, of animals, a silly voice and sing-along tunes (below). Every sound is
+generated with numpy, so there are no sound files; the station's voice is made once with Windows' own speech. The
+only downloads are the ones uv makes on the first run (Python and two libraries, see Requirements).
 
 Tap a pad or press its key. The keys follow the grid's shape on the keyboard and play the page you see:
 
@@ -14,7 +14,7 @@ Tap a pad or press its key. The keys follow the grid's shape on the keyboard and
 | 3 | `A S D F G H` | Fart, Boing, Slide whistle, Bubbles, Crickets, Ghost |
 | 4 | `Z X C V B N` | Laser, Explosion, Robot, Power up, Magic, Record scratch |
 
-**→** and **←** turn the page (so do a sideways swipe and the SOUNDS and STATION tabs). **M** mutes the
+**→** and **←** turn the page (so do a sideways swipe and the SOUNDS, STATION and PLAY tabs). **M** mutes the
 microphone and puts it back on the air (below). **Space** (or Esc) stops all sounds. The page also has a STOP button, a volume fader (0-150%) and a level meter.
 
 Python plays the sound through one audio stream. The radio itself is a small web page served on 127.0.0.1
@@ -82,11 +82,20 @@ the same as long as the PC keeps its network address.
 ## Plugins
 
 Extra buttons come from small Python files in `plugins/`; every one there is loaded at start. The radio ships
-with one:
+with these:
 
 - **Phone call** (`plugins/call_in.py`, on the STATION page): a phone rings, a beep says "talk now", the
   microphone records five seconds, and the radio plays a short station sting and then puts the caller on the air.
   With no microphone the screen says so and nothing else happens.
+- **Animals** (`plugins/animals.py`, on the PLAY page): a cow, a duck, a cat and an owl, each made with math
+  from harmonics and mouth shapes, no recordings. There is no dog: no bark made this way sounded like one.
+- **Silly voice** (`plugins/silly_voice.py`, on the PLAY page): a beep-boop says "talk now", the microphone
+  records three seconds, and the radio plays it back higher and quicker, like a chipmunk. It plays after
+  recording, never live. With no microphone the screen says so.
+- **Sing-along** (`plugins/sing_along.py`, on the PLAY page): each press plays the next tune on a music box:
+  Twinkle Twinkle Little Star, Old MacDonald Had a Farm, Row, Row, Row Your Boat and Happy Birthday. Old
+  public domain melodies, the notes only; each is under 15 seconds, and the screen shows its name. A press while
+  a tune plays is ignored, and STOP stops it.
 
 To write your own, see [docs/plugins.md](docs/plugins.md). Plugins never touch the network. Tests:
 `uv run --with numpy --with sounddevice python -m unittest discover -s tests` (no audio device is used;
@@ -113,6 +122,22 @@ The voice is Windows' own speech voice. The radio makes its six lines the first 
 and keeps them in a `cache/` folder next to `radio.py`; delete the folder to make them again. Making them only
 writes files, nothing is played. If Windows speech does not work on the PC, those pads play without the voice, and
 the display says "No voice on this PC" the first time.
+
+## The PLAY page
+
+The third page, after STATION. It has no pads of its own: the plugins above fill it, and without them the page
+is not there.
+
+| Key | Pad | What it plays |
+|---|---|---|
+| `1` | Cow | moo |
+| `2` | Duck | quack, quack, quack |
+| `3` | Cat | a kitten's meow |
+| `4` | Owl | hoo, hoo-hoo, hooo |
+| `Q` | Silly voice | records three seconds and plays it back as a chipmunk |
+| `W` | Sing-along | the next nursery tune on a music box |
+
+Every sound on it is levelled to be no louder than the pads.
 
 ## The MIC pad
 
