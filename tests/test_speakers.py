@@ -10,6 +10,7 @@ import json
 import re
 import sys
 import threading
+import time
 import types
 import unittest
 import urllib.error
@@ -33,6 +34,19 @@ class FakeStream:
 
     def close(self):
         self.active = False
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def read(self, frames):
+        """A mic that hears silence, ten times faster than real time (needs numpy)."""
+        import numpy as np
+        time.sleep(frames / 48000 / 10)
+        return np.zeros((frames, 1), np.float32), False
 
 
 class FakeSD(types.ModuleType):

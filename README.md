@@ -86,16 +86,16 @@ with these:
 
 - **Phone call** (`plugins/call_in.py`, on the STATION page): a phone rings, a beep says "talk now", the
   microphone records five seconds, and the radio plays a short station sting and then puts the caller on the air.
-  With no microphone the screen says so and nothing else happens.
+  With no microphone the screen says so and nothing else happens. STOP hangs up.
 - **Animals** (`plugins/animals.py`, on the PLAY page): a cow, a duck, a cat and an owl, each made with math
   from harmonics and mouth shapes, no recordings. There is no dog: no bark made this way sounded like one.
 - **Silly voice** (`plugins/silly_voice.py`, on the PLAY page): a beep-boop says "talk now", the microphone
   records three seconds, and the radio plays it back higher and quicker, like a chipmunk. It plays after
-  recording, never live. With no microphone the screen says so.
+  recording, never live. With no microphone the screen says so. STOP ends it.
 - **Sing-along** (`plugins/sing_along.py`, on the PLAY page): each press plays the next tune on a music box:
   Twinkle Twinkle Little Star, Old MacDonald Had a Farm, Row, Row, Row Your Boat and Happy Birthday. Old
   public domain melodies, the notes only; each is under 15 seconds, and the screen shows its name. A press while
-  a tune plays is ignored, and STOP stops it.
+  a tune plays is ignored; STOP stops it, and the next press plays the next tune.
 
 To write your own, see [docs/plugins.md](docs/plugins.md). Plugins never touch the network. Tests:
 `uv run --with numpy --with sounddevice python -m unittest discover -s tests` (no audio device is used;

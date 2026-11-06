@@ -127,6 +127,13 @@ class StationServer(unittest.TestCase):
             threading.Event().wait(0.01)
         self.assertEqual(self.api._message, (1, "Hello caller"))
 
+    def test_stop_stops_every_sound_and_tells_the_plugins(self):
+        told = []
+        self.api.add_button("🎶 Sing-along", "#0e9488", lambda: None, on_stop=lambda: told.append("stop"))
+        self.w.mixer.voices.append((SOUNDS[0][2], 0))
+        self.assertEqual(self.post("stop"), 204)
+        self.assertEqual((self.w.mixer.voices, told), ([], ["stop"]))
+
     def test_only_the_pads_without_a_voice_say_so(self):
         self.assertEqual([p["i"] for p in self.config("SOUNDS") if p.get("novoice")], [24])
 

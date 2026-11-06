@@ -1,6 +1,6 @@
 """Silly voice: a beep-boop says "talk now", the microphone records three seconds, and the radio plays it back
-higher and quicker, like a chipmunk. Played after recording, never live."""
-import time
+higher and quicker, like a chipmunk. Played after recording, never live. STOP ends it at any point."""
+import threading
 
 SR = 48000
 TALK_SECONDS = 3
@@ -24,22 +24,31 @@ def chipmunk(samples, speed=SPEED):
 
 
 def register(radio):
+    stopped = threading.Event()   # STOP: every wait below ends at once and nothing more plays
+
     def silly():
+        stopped.clear()
         if radio.record(0) is None:
             return "No microphone"            # say so and do nothing else
         radio.tone(660, 0.12)                 # beep-boop: your turn
-        time.sleep(0.15)
+        if stopped.wait(0.15):
+            return None
         radio.tone(990, 0.15)
-        time.sleep(0.35)
-        voice = radio.record(TALK_SECONDS)
+        if stopped.wait(0.35):
+            return None
+        voice = radio.record(TALK_SECONDS)    # STOP ends this early too
+        if stopped.is_set():
+            return None
         if voice is None:
             return "No microphone"
         squeak = chipmunk(voice)
         if not squeak:
             return "No microphone"
-        time.sleep(0.2)
+        if stopped.wait(0.2):
+            return None
         radio.play(squeak)                    # the radio levels it: never louder than the pads
-        time.sleep(len(squeak) / SR)          # one at a time: the button is busy until it has played
+        if stopped.wait(len(squeak) / SR):    # one at a time: the button is busy until it has played
+            return None
         return "🐿️ That was silly!"
 
-    radio.add_button("🐿️ Silly voice", "#d9468a", silly, page="Play")
+    radio.add_button("🐿️ Silly voice", "#d9468a", silly, page="Play", on_stop=stopped.set)

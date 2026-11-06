@@ -28,16 +28,44 @@ Save it as `plugins/doorbell.py` and start the radio. The console line lists the
 
 ## The API
 
-`radio` has four methods. That is the whole API; anything starting with `_` belongs to the app.
+`radio` has four methods, and `add_button` can take one optional function for STOP. That is the whole API;
+anything starting with `_` belongs to the app.
 
 | Method | What it does |
 |---|---|
-| `add_button(label, color, on_press, page=None)` | Adds a button. `label` is text (start it with an emoji to give the button a picture); `color` is a hex color like `"#ff6161"`; `on_press()` runs on its own thread each time the button is pressed. If `on_press` returns a string, the radio's screen shows it. A press while the last one is still running is ignored. `page="Station"` puts the button on the STATION page among its pads; without `page` it goes in the row under the pads. |
+| `add_button(label, color, on_press, page=None, on_stop=None)` | Adds a button. `label` is text (start it with an emoji to give the button a picture); `color` is a hex color like `"#ff6161"`; `on_press()` runs on its own thread each time the button is pressed. If `on_press` returns a string, the radio's screen shows it. A press while the last one is still running is ignored. `page="Station"` puts the button on the STATION page among its pads; without `page` it goes in the row under the pads. `on_stop()` is called when STOP is pressed, after every sound has stopped; see below. |
 | `play(sound)` | Starts a sound and returns at once; sounds overlap. `sound` is a pad's name (`"Ding!"`, `"Boing"`, `"Station ID"`, ...) or samples: what `record()` returned, or a sound the plugin made itself (48 kHz mono, a list or a numpy array, up to 60 seconds). Samples are levelled so they are never louder than the pads, and STOP stops them like a pad. A name that does not exist raises `KeyError`. |
 | `tone(freq, seconds)` | Starts a soft sine wave and returns at once. The frequency is kept between 40 and 4000 Hz and the length at 5 seconds or less. |
-| `record(seconds)` | Records from the Windows default microphone and returns the samples (48 kHz, mono), or `None` when there is no microphone. Blocks while it records; at most 30 seconds. `record(0)` only checks that a microphone is there. |
+| `record(seconds)` | Records from the Windows default microphone and returns the samples (48 kHz, mono), or `None` when there is no microphone. Blocks while it records; at most 30 seconds. `record(0)` only checks that a microphone is there. In the press of a button that has an `on_stop`, STOP ends the recording early and it returns what it heard so far. |
 
 There is no `say()`: the station voice says only the STATION page's own lines.
+
+## When STOP is pressed
+
+STOP stops every sound, plugin sounds included. A button whose press takes a while (it waits, rings, records)
+should also give `on_stop`, so STOP ends the press and the button is ready for the next one at once. The way to
+do it is to wait on a `threading.Event` instead of `time.sleep`, and let STOP set it:
+
+```python
+import threading
+
+
+def register(radio):
+    stopped = threading.Event()
+
+    def knock():
+        stopped.clear()
+        for _ in range(3):
+            radio.tone(200, 0.1)
+            if stopped.wait(0.5):    # True when STOP was pressed: stop here
+                return None
+        return "Who's there?"
+
+    radio.add_button("🚪 Knock knock", "#66b8ff", knock, on_stop=stopped.set)
+```
+
+`on_stop` should only set something and return; `plugins/call_in.py`, `silly_voice.py` and `sing_along.py` all use
+it. A plugin without `on_stop` works as it always has: STOP stops its sounds and its press runs to the end.
 
 ## Rules
 
@@ -47,12 +75,13 @@ There is no `say()`: the station voice says only the STATION page's own lines.
   function that needs it (the first press), not at the top of the file: the plain test run has no numpy, and it
   still loads every shipped plugin.
 - **A tune is one sound.** Make the whole thing first and `play()` it once, rather than many `tone()`s in a row:
-  STOP stops a sound, but cannot stop a plugin that is still calling `tone()`.
+  STOP stops a sound, and a plugin that is still calling `tone()` keeps going unless it listens with `on_stop`.
 - **Be kind to small ears.** Everything a plugin plays is levelled to be no louder than the pads, and recordings
   are played back after recording, never live, so the speaker cannot feed back into the mic.
 - **A broken plugin never breaks the radio.** If `register` raises (or the file does not import), that plugin is
   skipped with one line in the console and any buttons it added are taken away again. If `on_press` raises, the
-  console gets one line and the button works again on the next press.
+  console gets one line and the button works again on the next press. If `on_stop` raises, the console gets one
+  line and STOP still reaches the other plugins.
 
 ## Testing
 

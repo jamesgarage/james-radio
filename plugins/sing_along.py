@@ -94,4 +94,7 @@ def register(radio):
         radio.play(made[k])                  # one sound: never louder than the pads, and STOP stops it
         return TUNES[k][0]
 
-    radio.add_button("🎶 Sing-along", "#0e9488", sing, page="Play")
+    def stopped():
+        state["until"] = 0.0                 # STOP stopped the tune: the next press plays the next one at once
+
+    radio.add_button("🎶 Sing-along", "#0e9488", sing, page="Play", on_stop=stopped)

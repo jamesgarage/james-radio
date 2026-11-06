@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from test_mic import HAVE_NUMPY, needs_numpy
-from test_plugins import make_radio, plugins
+from test_plugins import free, make_radio, no_waiting, plugins, until
 
 if HAVE_NUMPY:
     import numpy as np
@@ -19,14 +19,19 @@ SR = 48000
 SCREEN = 22   # characters a message can have and still fit the display on a phone ("TOO LOUD, MOVE THE MIC")
 
 
-def load(name, mic=True):
-    """The plugin's module, registered on a radio with fake audio: (module, its buttons by label, the fake)."""
+def setup(name, mic=True, realtime=False):
+    """The plugin's module, registered on a radio with fake audio: (module, its buttons by label, the fake, the
+    radio)."""
     spec = importlib.util.spec_from_file_location(f"test_play_{name}", plugins.HERE / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    radio, calls, _ = make_radio(mic)
+    radio, calls, _ = make_radio(mic, realtime)
     module.register(radio)
-    return module, {b.label: b for b in radio._buttons}, calls
+    return module, {b.label: b for b in radio._buttons}, calls, radio
+
+
+def load(name, mic=True):
+    return setup(name, mic)[:3]
 
 
 def frequency(samples):
@@ -91,18 +96,30 @@ class AnimalSounds(unittest.TestCase):
 class SillyVoice(unittest.TestCase):
     def test_no_microphone_says_so_and_does_nothing_else(self):
         _, buttons, calls = load("silly_voice", mic=False)
-        with mock.patch("time.sleep"):
+        with no_waiting():
             self.assertEqual(buttons["🐿️ Silly voice"].on_press(), "No microphone")
         self.assertEqual(calls.log, [("record", 0.0)])
 
     def test_it_beeps_records_three_seconds_then_plays_it_back_after(self):
         _, buttons, calls = load("silly_voice")
-        with mock.patch("time.sleep"):
+        with no_waiting():
             self.assertEqual(buttons["🐿️ Silly voice"].on_press(), "🐿️ That was silly!")
         self.assertEqual(calls.log[0], ("record", 0.0))
         self.assertEqual([c[0] for c in calls.log[1:3]], ["tone", "tone"])   # the "talk now" beep-boop
         self.assertEqual(calls.log[3], ("record", 3.0))
         self.assertEqual(calls.log[4:], [("play", 18)])   # 30 fake samples sped up 1.6x; played after, never live
+
+    def test_stop_while_you_talk_frees_it_at_once_and_plays_nothing(self):
+        _, buttons, calls, radio = setup("silly_voice", realtime=True)
+        button = buttons["🐿️ Silly voice"]
+        self.assertTrue(radio._press(radio._buttons.index(button)))
+        self.assertTrue(until(lambda: ("record", 3.0) in calls.log))   # recording, for three real seconds
+        radio._stop()
+        self.assertTrue(free(button, within=0.5))
+        self.assertNotIn("play", [c[0] for c in calls.log])
+        self.assertEqual(radio._message, (0, ""))
+        with no_waiting():
+            self.assertEqual(button.on_press(), "🐿️ That was silly!")   # and the next press is a whole one
 
     def test_the_chipmunk_is_higher_and_shorter(self):
         module, _, _ = load("silly_voice")
@@ -145,6 +162,17 @@ class SingAlong(unittest.TestCase):
                 said.append(press())
         self.assertEqual(said, ["🎵 Old MacDonald", "🎵 Row your boat", "🎵 Happy birthday", "🎵 Twinkle twinkle"])
         self.assertEqual([c[0] for c in calls.log], ["play"] * 5)   # each tune is ONE sound, so STOP stops it
+
+    def test_after_stop_the_next_press_plays_the_next_tune_at_once(self):
+        module, buttons, calls, radio = setup("sing_along")
+        press, clock = buttons["🎶 Sing-along"].on_press, [1000.0]
+        with mock.patch.object(module, "render", side_effect=lambda tune: [0.1] * len(tune[2])), \
+                mock.patch("time.monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(press(), "🎵 Twinkle twinkle")
+            clock[0] += 2
+            radio._stop()                                   # the mixer has stopped the tune
+            self.assertEqual(press(), "🎵 Old MacDonald")   # not ignored for the rest of Twinkle's 8 s
+        self.assertEqual([c[0] for c in calls.log], ["play"] * 2)
 
 
 @needs_numpy

@@ -22,9 +22,10 @@ def _print(text):
 
 
 class _Button:
-    def __init__(self, label, color, on_press, page=None):
-        self.label, self.color, self.on_press, self.page = label, color, on_press, page
+    def __init__(self, label, color, on_press, page=None, on_stop=None):
+        self.label, self.color, self.on_press, self.page, self.on_stop = label, color, on_press, page, on_stop
         self.busy = threading.Lock()
+        self.halt = threading.Event()   # set by STOP; a fresh one for every press
 
 
 class Radio:
@@ -36,10 +37,13 @@ class Radio:
         self._buttons = []        # drawn in load order: on the page they name, else in the row under the pads
         self._message = (0, "")   # (count, text): the latest on_press reply, shown on the screen
         self._lock = threading.Lock()
+        self._here = threading.local()   # .halt: the STOP event of the press running on this thread, if it has one
 
-    def add_button(self, label, color, on_press, page=None):
+    def add_button(self, label, color, on_press, page=None, on_stop=None):
         """A button on the radio. on_press() runs on its own thread; a string it returns is shown on the screen.
-        page names a page of pads to put it on ("Station"); without one it sits in the row under the pads."""
+        page names a page of pads to put it on ("Station"); without one it sits in the row under the pads.
+        on_stop() is called when STOP is pressed (every sound has stopped by then); give one and a record() running
+        in this button's press ends early too, so the press can finish and the button is ready again."""
         if not isinstance(label, str) or not label.strip():
             raise ValueError("label must be some text")
         if not (isinstance(color, str) and COLOR.fullmatch(color)):
@@ -48,7 +52,9 @@ class Radio:
             raise TypeError("on_press must be a function")
         if page is not None and not (isinstance(page, str) and page.strip()):
             raise ValueError("page must be a page's name, like 'Station'")
-        self._buttons.append(_Button(label.strip(), color, on_press, page and page.strip()))
+        if on_stop is not None and not callable(on_stop):
+            raise TypeError("on_stop must be a function")
+        self._buttons.append(_Button(label.strip(), color, on_press, page and page.strip(), on_stop))
 
     def play(self, sound):
         """Start a built-in sound by name ("Ding!") or samples from record(); returns at once, sounds overlap."""
@@ -63,16 +69,21 @@ class Radio:
     def record(self, seconds):
         """Record up to 30 s from the default microphone: 48 kHz mono samples, or None when there is no microphone.
 
-        Blocks while recording. record(0) only checks that a microphone is there."""
-        return self._record(min(max(float(seconds), 0.0), LONGEST_RECORDING))
+        Blocks while recording. record(0) only checks that a microphone is there. In the press of a button with an
+        on_stop, STOP ends it early: what was heard so far."""
+        seconds = min(max(float(seconds), 0.0), LONGEST_RECORDING)
+        halt = getattr(self._here, "halt", None)
+        return self._record(seconds) if halt is None else self._record(seconds, halt)
 
     def _press(self, i):
         """Run button i's on_press on its own thread. A press while the last one is still running is ignored."""
         button = self._buttons[i]
         if not button.busy.acquire(blocking=False):
             return False
+        halt = button.halt = threading.Event()
 
         def run():
+            self._here.halt = halt if button.on_stop else None
             try:
                 reply = button.on_press()
                 if isinstance(reply, str) and reply:
@@ -85,6 +96,17 @@ class Radio:
 
         threading.Thread(target=run, daemon=True).start()
         return True
+
+    def _stop(self):
+        """STOP was pressed and every sound has stopped: tell each button that asked, and end its recording."""
+        for button in list(self._buttons):
+            if button.on_stop is None:
+                continue
+            button.halt.set()
+            try:
+                button.on_stop()
+            except Exception as e:
+                self._log(f"Plugin button {button.label!r} on_stop failed: {_one_line(e)}")
 
 
 def _one_line(e):

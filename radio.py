@@ -1133,9 +1133,10 @@ class Mixer:
             else:
                 self.voices.append((snd, 0))
 
-    def record(self, seconds):
+    def record(self, seconds, halt=None):
         """Mono float32 samples from the microphone (the one picked on the page, else Windows' default); None when
-        there is none. record(0) only checks."""
+        there is none. record(0) only checks. A halt (threading.Event) that is set ends it early, with what it has:
+        STOP, for a plugin button that listens for it."""
         with self.open_lock:   # held throughout: a device re-scan in _open() would pull the mic from under the read
             if self._mic_index() < 0:
                 try:
@@ -1151,7 +1152,15 @@ class Mixer:
                 com_ready()
                 with sd.InputStream(device=mic, samplerate=SR, channels=1, dtype="float32",
                                     extra_settings=sd.WasapiSettings(auto_convert=True)) as stream:
-                    data, _ = stream.read(int(SR * seconds))
+                    if halt is None:
+                        data, _ = stream.read(int(SR * seconds))
+                    else:   # in 50 ms pieces, looking for the halt between them
+                        pieces, left = [], int(SR * seconds)
+                        while left > 0 and not halt.is_set():
+                            piece, _ = stream.read(min(left, SR // 20))
+                            pieces.append(piece)
+                            left -= len(piece)
+                        data = np.concatenate(pieces) if pieces else np.zeros((0, 1), np.float32)
             except sd.PortAudioError:
                 return None
             return data[:, 0].copy()
@@ -1337,6 +1346,7 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0, pages=None, v
                     radio._press(int(arg))
                 elif what == "stop":
                     mixer.stop_all()
+                    radio._stop()   # the plugins that asked hear about it (sounds first: a slow plugin can't hold them)
                 elif what == "volume":
                     mixer.volume = max(0.0, min(float(arg), 150.0)) / 100
                 elif what == "speaker":

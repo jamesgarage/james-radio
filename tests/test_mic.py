@@ -7,6 +7,7 @@ Under plain  py -3 -m unittest discover -s tests  they are skipped when numpy is
 import json
 import re
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -384,6 +385,33 @@ class MicRoutes(unittest.TestCase):
         self.assertEqual(self.post("onair/on"), 409)
         self.assertEqual(SD.mics, [])
         self.assertEqual(self.listing()["mics"], [])
+
+
+@needs_numpy
+class Recording(unittest.TestCase):
+    """What a plugin's record() gets: the fake mic hears silence ten times faster than real time."""
+
+    def setUp(self):
+        self.w = World(mics=MICS)
+
+    def test_the_whole_length_without_a_halt(self):
+        self.assertEqual(len(self.w.mixer.record(1.0)), SR)
+        self.assertEqual(len(self.w.mixer.record(0)), 0)
+
+    def test_a_halt_ends_it_early_with_what_it_has(self):
+        halt = threading.Event()
+        threading.Timer(0.1, halt.set).start()
+        started = time.monotonic()
+        voice = self.w.mixer.record(30.0, halt)   # three seconds of fake mic
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertTrue(0 < len(voice) < 30 * SR)
+        self.assertEqual(voice.dtype, np.float32)
+
+    def test_halted_before_it_starts_it_is_empty(self):
+        halt = threading.Event()
+        halt.set()
+        self.assertEqual(len(self.w.mixer.record(5.0, halt)), 0)
+        self.assertIsNone(World().mixer.record(5.0, halt))   # and no mic is still None
 
 
 if __name__ == "__main__":
