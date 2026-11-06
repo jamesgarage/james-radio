@@ -2,7 +2,8 @@
 # requires-python = ">=3.10"
 # dependencies = ["sounddevice", "numpy"]
 # ///
-"""James' Radio: 24 synthesized sounds on glowing toy-style pads, and a STATION page of radio drops, in an app window.
+"""James' Radio: 24 synthesized sounds on glowing toy-style pads, a STATION page of radio drops and a PLAY page the
+plugins fill, in an app window.
 
     uv run radio.py                               # Windows' default output, followed when it changes
     uv run radio.py --out "Speakers (USB"
@@ -466,8 +467,9 @@ STATION = [("Station ID", "📻", station_id, "You're listening to James' Radio!
            ("Applause", "👏", "Applause", None, None),
            ("Sign off", "🌙", goodnight_chime, "That's all for today, goodnight!", None)]
 # The pages, in order: (name, picture, how many pads of the sound list, where on it the plugin buttons that ask for
-# it go: None = after its pads). On STATION, Phone call (plugins/call_in.py) comes after Breaking news.
-PAGES = [("Sounds", "🎛️", len(SOUNDS), None), ("Station", "📡", len(STATION), 5)]
+# it go: None = after its pads). On STATION, Phone call (plugins/call_in.py) comes after Breaking news. PLAY has no
+# pads of its own: the plugins fill it (animals, Silly voice, Sing-along), and it is left out when none do.
+PAGES = [("Sounds", "🎛️", len(SOUNDS), None), ("Station", "📡", len(STATION), 5), ("Play", "🧸", 0, None)]
 
 
 def trim(s, floor=0.01):
@@ -1252,6 +1254,8 @@ def make_server(mixer, sounds, radio, address="127.0.0.1", port=0, pages=None, v
     made, so the page says so (once) the first time one is pressed."""
     token = secrets.token_urlsafe(16)   # only this page may press the buttons
     pages = pages or [(PAGES[0][0], PAGES[0][1], len(sounds), None)]
+    named = {b.page.lower() for b in radio._buttons if b.page}
+    pages = [p for p in pages if p[2] or p[0].lower() in named]   # a page with no pads of its own needs a plugin
     titles = {title.lower() for title, *_ in pages}
     on_pages = [(k, b.page, b.label, b.color) for k, b in enumerate(radio._buttons)
                 if b.page and b.page.lower() in titles]
@@ -1732,6 +1736,11 @@ input[type=range]::-moz-range-thumb { width: 3.6rem; height: 5.4rem; border: 0; 
   .track { --gap: 2.4rem; align-items: flex-start; }   /* each page its own height: the page below follows */
   .tabs { justify-self: auto; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); margin: 0; }
   .tab { min-width: 0; padding: 0 1rem; }
+  /* Three tabs share a phone's width: tighter letters, and the type shrinks with the screen. */
+  .tabs:has(> .tab:nth-child(3)) { gap: .5rem; }
+  .tabs:has(> .tab:nth-child(3)) .tab { gap: .5rem; padding: 0 .4rem; letter-spacing: .1em;
+    font-size: max(11px, min(1.5rem, 3.3vw)); }
+  .tabs:has(> .tab:nth-child(3)) .tname { margin-right: -.1em; }
   .extras { display: grid; justify-content: center;   /* fixed-width tracks: a short last row sits centred */
     grid-template-columns: repeat(auto-fit, calc((100% - (var(--cols) - 1) * 1rem) / var(--cols))); }
   .extras .well { width: auto; height: auto; aspect-ratio: 1.1; }

@@ -69,7 +69,7 @@ class PageModel(unittest.TestCase):
     def test_the_station_is_the_owners_list(self):
         self.assertEqual([s[0] for s in radio.STATION],
                          ["Station ID", "Sponsors", "Music", "Weather", "Breaking news", "Applause", "Sign off"])
-        self.assertEqual([p[:3] for p in radio.PAGES], [("Sounds", "🎛️", 24), ("Station", "📡", 7)])
+        self.assertEqual([p[:3] for p in radio.PAGES], [("Sounds", "🎛️", 24), ("Station", "📡", 7), ("Play", "🧸", 0)])
         said = {s[0]: s[3] for s in radio.STATION}
         self.assertEqual(said["Station ID"], "You're listening to James' Radio!")
         self.assertEqual(said["Sign off"], "That's all for today, goodnight!")
@@ -139,6 +139,25 @@ class StationServer(unittest.TestCase):
             self.html = r.read().decode("utf-8")
         self.assertEqual([p["name"] for p in self.config("PAGES")], ["Sounds"])
         self.assertEqual([x["k"] for x in self.config("EXTRAS")], [0, 1])   # no STATION page: both buttons below
+
+    def serve(self, pages):
+        server, url, _ = radio.make_server(self.w.mixer, SOUNDS, self.api, pages=pages)
+        threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with urllib.request.urlopen(url, timeout=5) as r:
+            self.html = r.read().decode("utf-8")
+
+    def test_a_page_with_no_pads_of_its_own_shows_only_when_a_plugin_fills_it(self):
+        pages = PAGES + [("Play", "c", 0, None)]
+        self.serve(pages)   # Phone call is on STATION and the Doorbell below: nothing asks for PLAY
+        self.assertEqual([p["name"] for p in self.config("PAGES")], ["Sounds", "Station"])
+        self.api.add_button("🐄 Cow", "#2e9e4f", lambda: "MOO", page="play")
+        self.serve(pages)
+        self.assertEqual(self.config("PAGES")[2], {"name": "Play", "emoji": "c", "few": True})
+        self.assertEqual([p for p in self.config("SOUNDS") if p["page"] == 2],
+                         [{"button": 2, "label": "🐄 Cow", "c": "#2e9e4f", "page": 2, "key": "1"}])
+        self.assertEqual([x["k"] for x in self.config("EXTRAS")], [1])   # only the Doorbell below
 
 
 class SpeechScript(unittest.TestCase):
