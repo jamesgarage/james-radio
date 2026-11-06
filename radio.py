@@ -2056,6 +2056,21 @@ paintMic();
 // Plugin buttons (plugins/*.py) that name no page sit in the row under the pads, beside the MIC.
 EXTRAS.forEach((x) => makePad($("extras"), look(x), () => { post(`/button/${x.k}`); show(x.label); }));
 
+// A one-word label too wide for its pad (COUNTDOWN on a narrow phone) gets a smaller font until it fits, never
+// below 9px; a label that fits keeps the usual size.
+function fitLabels() {
+  document.querySelectorAll(".well:not(.micwell) .lbl").forEach((l) => {
+    l.style.fontSize = "";
+    for (let fs = parseFloat(getComputedStyle(l).fontSize); l.scrollWidth > l.clientWidth + 0.5 && fs > 9;) {
+      fs = Math.max(9, fs - 0.5);
+      l.style.fontSize = `${fs}px`;
+    }
+  });
+}
+fitLabels();
+document.fonts.ready.then(fitLabels);
+addEventListener("resize", fitLabels);
+
 function stopAll() {
   post("/stop");
   SOUNDS.forEach((s, i) => { clearTimeout(lit[i]); s.well.classList.remove("lit"); });
